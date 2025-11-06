@@ -166,276 +166,295 @@ impl MyApp {
     }
 
     fn render_request_section(&mut self, ui: &mut egui::Ui) {
-        // Request tabs
-        ui.horizontal(|ui| {
-            if matches!(
-                self.method,
-                HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
-            ) {
-                ui.selectable_value(&mut self.active_request_tab, RequestTab::Body, "Body");
-            }
-            ui.selectable_value(&mut self.active_request_tab, RequestTab::Headers, "Headers");
-            ui.selectable_value(&mut self.active_request_tab, RequestTab::Auth, "Auth");
-        });
-
-        ui.separator();
-
-        // Request content
-        egui::ScrollArea::vertical()
-            .id_salt("request_scroll")
+        egui::Frame::NONE
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)))
+            .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
-                match self.active_request_tab {
-                    RequestTab::Body => {
-                        if matches!(
-                            self.method,
-                            HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
-                        ) {
-                            // Content type selector and prettify button
-                            ui.horizontal(|ui| {
-                                ui.label("Body");
+                ui.label(egui::RichText::new("Request Configuration").strong());
+                ui.add_space(5.0);
+                // Request tabs
+                ui.horizontal(|ui| {
+                    if matches!(
+                        self.method,
+                        HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
+                    ) {
+                        ui.selectable_value(&mut self.active_request_tab, RequestTab::Body, "Body");
+                    }
+                    ui.selectable_value(
+                        &mut self.active_request_tab,
+                        RequestTab::Headers,
+                        "Headers",
+                    );
+                    ui.selectable_value(&mut self.active_request_tab, RequestTab::Auth, "Auth");
+                });
 
-                                egui::ComboBox::from_id_salt("content_type")
-                                    .selected_text(match self.content_type {
-                                        ContentType::Json => "JSON",
-                                        ContentType::FormData => "Form Data",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.content_type,
-                                            ContentType::Json,
-                                            "JSON",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.content_type,
-                                            ContentType::FormData,
-                                            "Form Data",
+                ui.separator();
+
+                // Request content
+                egui::ScrollArea::vertical()
+                    .id_salt("request_scroll")
+                    .show(ui, |ui| {
+                        match self.active_request_tab {
+                            RequestTab::Body => {
+                                if matches!(
+                                    self.method,
+                                    HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
+                                ) {
+                                    // Content type selector and prettify button
+                                    ui.horizontal(|ui| {
+                                        ui.label("Body");
+
+                                        egui::ComboBox::from_id_salt("content_type")
+                                            .selected_text(match self.content_type {
+                                                ContentType::Json => "JSON",
+                                                ContentType::FormData => "Form Data",
+                                            })
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut self.content_type,
+                                                    ContentType::Json,
+                                                    "JSON",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut self.content_type,
+                                                    ContentType::FormData,
+                                                    "Form Data",
+                                                );
+                                            });
+
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if self.content_type == ContentType::Json {
+                                                    if ui.button("✨ Prettify").clicked() {
+                                                        self.prettify_json();
+                                                    }
+                                                }
+                                            },
                                         );
                                     });
 
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if self.content_type == ContentType::Json {
-                                            if ui.button("✨ Prettify").clicked() {
-                                                self.prettify_json();
-                                            }
+                                    ui.add_space(5.0);
+
+                                    match self.content_type {
+                                        ContentType::Json => {
+                                            egui::TextEdit::multiline(&mut self.body)
+                                                .desired_width(f32::INFINITY)
+                                                .desired_rows(25)
+                                                .code_editor()
+                                                .show(ui);
                                         }
-                                    },
-                                );
-                            });
+                                        ContentType::FormData => {
+                                            let mut to_remove = None;
 
-                            ui.add_space(5.0);
-
-                            match self.content_type {
-                                ContentType::Json => {
-                                    egui::TextEdit::multiline(&mut self.body)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(20)
-                                        .code_editor()
-                                        .show(ui);
-                                }
-                                ContentType::FormData => {
-                                    let mut to_remove = None;
-
-                                    for (i, field) in self.form_data.iter_mut().enumerate() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Key:");
-                                            ui.add(
-                                                egui::TextEdit::singleline(&mut field.key)
-                                                    .desired_width(100.0),
-                                            );
-
-                                            egui::ComboBox::from_id_salt(format!(
-                                                "field_type_{}",
-                                                i
-                                            ))
-                                            .selected_text(match field.field_type {
-                                                FormFieldType::Text => "Text",
-                                                FormFieldType::File => "File",
-                                            })
-                                            .width(60.0)
-                                            .show_ui(
-                                                ui,
-                                                |ui| {
-                                                    if ui
-                                                        .selectable_value(
-                                                            &mut field.field_type,
-                                                            FormFieldType::Text,
-                                                            "Text",
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        field.value.clear();
-                                                        field.files.clear();
-                                                    }
-                                                    if ui
-                                                        .selectable_value(
-                                                            &mut field.field_type,
-                                                            FormFieldType::File,
-                                                            "File",
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        field.value.clear();
-                                                        field.files.clear();
-                                                    }
-                                                },
-                                            );
-
-                                            match field.field_type {
-                                                FormFieldType::Text => {
-                                                    ui.label("Value:");
+                                            for (i, field) in self.form_data.iter_mut().enumerate()
+                                            {
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Key:");
                                                     ui.add(
-                                                        egui::TextEdit::singleline(
-                                                            &mut field.value,
-                                                        )
-                                                        .desired_width(120.0),
+                                                        egui::TextEdit::singleline(&mut field.key)
+                                                            .desired_width(100.0),
                                                     );
-                                                }
-                                                FormFieldType::File => {
-                                                    if ui.button("📁").clicked() {
-                                                        if let Some(paths) =
-                                                            rfd::FileDialog::new().pick_files()
+
+                                                    egui::ComboBox::from_id_salt(format!(
+                                                        "field_type_{}",
+                                                        i
+                                                    ))
+                                                    .selected_text(match field.field_type {
+                                                        FormFieldType::Text => "Text",
+                                                        FormFieldType::File => "File",
+                                                    })
+                                                    .width(60.0)
+                                                    .show_ui(ui, |ui| {
+                                                        if ui
+                                                            .selectable_value(
+                                                                &mut field.field_type,
+                                                                FormFieldType::Text,
+                                                                "Text",
+                                                            )
+                                                            .clicked()
                                                         {
-                                                            field.files = paths
-                                                                .into_iter()
-                                                                .map(|p| p.display().to_string())
-                                                                .collect();
+                                                            field.value.clear();
+                                                            field.files.clear();
+                                                        }
+                                                        if ui
+                                                            .selectable_value(
+                                                                &mut field.field_type,
+                                                                FormFieldType::File,
+                                                                "File",
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            field.value.clear();
+                                                            field.files.clear();
+                                                        }
+                                                    });
+
+                                                    match field.field_type {
+                                                        FormFieldType::Text => {
+                                                            ui.label("Value:");
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(
+                                                                    &mut field.value,
+                                                                )
+                                                                .desired_width(120.0),
+                                                            );
+                                                        }
+                                                        FormFieldType::File => {
+                                                            if ui.button("📁").clicked() {
+                                                                if let Some(paths) =
+                                                                    rfd::FileDialog::new()
+                                                                        .pick_files()
+                                                                {
+                                                                    field.files = paths
+                                                                        .into_iter()
+                                                                        .map(|p| {
+                                                                            p.display().to_string()
+                                                                        })
+                                                                        .collect();
+                                                                }
+                                                            }
+                                                            if !field.files.is_empty() {
+                                                                ui.label(format!(
+                                                                    "{} file(s)",
+                                                                    field.files.len()
+                                                                ));
+                                                            }
                                                         }
                                                     }
-                                                    if !field.files.is_empty() {
-                                                        ui.label(format!(
-                                                            "{} file(s)",
-                                                            field.files.len()
-                                                        ));
+
+                                                    if ui.button("❌").clicked() {
+                                                        to_remove = Some(i);
                                                     }
+                                                });
+
+                                                if field.field_type == FormFieldType::File
+                                                    && !field.files.is_empty()
+                                                {
+                                                    ui.indent(format!("files_{}", i), |ui| {
+                                                        for file in &field.files {
+                                                            ui.label(format!(
+                                                                "  • {}",
+                                                                std::path::Path::new(file)
+                                                                    .file_name()
+                                                                    .and_then(|n| n.to_str())
+                                                                    .unwrap_or(file)
+                                                            ));
+                                                        }
+                                                    });
                                                 }
                                             }
 
-                                            if ui.button("❌").clicked() {
-                                                to_remove = Some(i);
+                                            if let Some(i) = to_remove {
+                                                self.form_data.remove(i);
                                             }
-                                        });
 
-                                        if field.field_type == FormFieldType::File
-                                            && !field.files.is_empty()
-                                        {
-                                            ui.indent(format!("files_{}", i), |ui| {
-                                                for file in &field.files {
-                                                    ui.label(format!(
-                                                        "  • {}",
-                                                        std::path::Path::new(file)
-                                                            .file_name()
-                                                            .and_then(|n| n.to_str())
-                                                            .unwrap_or(file)
-                                                    ));
-                                                }
-                                            });
+                                            if ui.button("➕ Add Field").clicked() {
+                                                self.form_data.push(FormField {
+                                                    key: String::new(),
+                                                    value: String::new(),
+                                                    files: Vec::new(),
+                                                    field_type: FormFieldType::Text,
+                                                });
+                                            }
                                         }
-                                    }
-
-                                    if let Some(i) = to_remove {
-                                        self.form_data.remove(i);
-                                    }
-
-                                    if ui.button("➕ Add Field").clicked() {
-                                        self.form_data.push(FormField {
-                                            key: String::new(),
-                                            value: String::new(),
-                                            files: Vec::new(),
-                                            field_type: FormFieldType::Text,
-                                        });
                                     }
                                 }
                             }
-                        }
-                    }
-                    RequestTab::Headers => {
-                        egui::TextEdit::multiline(&mut self.headers)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(15)
-                            .code_editor()
-                            .show(ui);
-                    }
-                    RequestTab::Auth => {
-                        ui.horizontal(|ui| {
-                            ui.label("Type:");
-                            egui::ComboBox::from_id_salt("auth_type")
-                                .selected_text(match self.auth_type {
-                                    AuthType::None => "No Auth",
-                                    AuthType::Bearer => "Bearer Token",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.auth_type,
-                                        AuthType::None,
-                                        "No Auth",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.auth_type,
-                                        AuthType::Bearer,
-                                        "Bearer Token",
-                                    );
+                            RequestTab::Headers => {
+                                egui::TextEdit::multiline(&mut self.headers)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(25)
+                                    .code_editor()
+                                    .show(ui);
+                            }
+                            RequestTab::Auth => {
+                                ui.horizontal(|ui| {
+                                    ui.label("Type:");
+                                    egui::ComboBox::from_id_salt("auth_type")
+                                        .selected_text(match self.auth_type {
+                                            AuthType::None => "No Auth",
+                                            AuthType::Bearer => "Bearer Token",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.auth_type,
+                                                AuthType::None,
+                                                "No Auth",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.auth_type,
+                                                AuthType::Bearer,
+                                                "Bearer Token",
+                                            );
+                                        });
                                 });
-                        });
 
-                        if self.auth_type == AuthType::Bearer {
-                            ui.add_space(10.0);
-                            ui.horizontal(|ui| {
-                                ui.label("Token:");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.bearer_token)
-                                        .desired_width(f32::INFINITY)
-                                        .password(false),
-                                );
-                            });
+                                if self.auth_type == AuthType::Bearer {
+                                    ui.add_space(10.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label("Token:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.bearer_token)
+                                                .desired_width(f32::INFINITY)
+                                                .password(false),
+                                        );
+                                    });
+                                }
+                            }
                         }
-                    }
-                }
+                    });
             });
     }
 
     fn render_response_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Response").strong());
-        ui.add_space(5.0);
+        egui::Frame::NONE
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)))
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Response").strong());
+                ui.add_space(5.0);
 
-        // Response tabs
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.active_response_tab, ResponseTab::Body, "Body");
-            ui.selectable_value(
-                &mut self.active_response_tab,
-                ResponseTab::Headers,
-                "Headers",
-            );
+                // Response tabs
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.active_response_tab, ResponseTab::Body, "Body");
+                    ui.selectable_value(
+                        &mut self.active_response_tab,
+                        ResponseTab::Headers,
+                        "Headers",
+                    );
 
-            if !self.response_status.is_empty() {
+                    if !self.response_status.is_empty() {
+                        ui.separator();
+                        ui.label(&self.response_status);
+                    }
+
+                    if self.loading {
+                        ui.spinner();
+                    }
+                });
+
                 ui.separator();
-                ui.label(&self.response_status);
-            }
 
-            if self.loading {
-                ui.spinner();
-            }
-        });
-
-        ui.separator();
-
-        // Response display
-        egui::ScrollArea::vertical()
-            .id_salt("response_scroll")
-            .show(ui, |ui| match self.active_response_tab {
-                ResponseTab::Body => {
-                    egui::TextEdit::multiline(&mut self.response_body.as_str())
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(20)
-                        .show(ui);
-                }
-                ResponseTab::Headers => {
-                    egui::TextEdit::multiline(&mut self.response_headers.as_str())
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(20)
-                        .show(ui);
-                }
+                // Response display
+                egui::ScrollArea::vertical()
+                    .id_salt("response_scroll")
+                    .show(ui, |ui| match self.active_response_tab {
+                        ResponseTab::Body => {
+                            egui::TextEdit::multiline(&mut self.response_body.as_str())
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(25)
+                                .code_editor()
+                                .show(ui);
+                        }
+                        ResponseTab::Headers => {
+                            egui::TextEdit::multiline(&mut self.response_headers.as_str())
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(25)
+                                .code_editor()
+                                .show(ui);
+                        }
+                    });
             });
     }
 
@@ -644,7 +663,7 @@ impl MyApp {
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size((1200.0, 800.0))
+            .with_inner_size((1600.0, 800.0))
             .with_min_inner_size((800.0, 500.0)),
         ..eframe::NativeOptions::default()
     };
@@ -686,7 +705,7 @@ impl eframe::App for MyApp {
                 });
             });
 
-            ui.label(egui::RichText::new("Request").strong());
+            ui.label(egui::RichText::new("New Request").strong());
             ui.add_space(5.0);
 
             // Request method/url/send
@@ -728,7 +747,6 @@ impl eframe::App for MyApp {
                     ui.columns(2, |columns| {
                         // Left column - Request
                         columns[0].vertical(|ui| {
-                            ui.add_space(23.0);
                             self.render_request_section(ui);
                         });
 
