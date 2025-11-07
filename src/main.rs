@@ -246,6 +246,8 @@ impl MyApp {
                                     let rows =
                                         (ui.available_height() / line_height).max(1.0) as usize;
 
+                                    ui.set_min_width(ui.available_width());
+
                                     egui::TextEdit::multiline(&mut self.body)
                                         .code_editor()
                                         .desired_width(f32::INFINITY)
@@ -395,6 +397,8 @@ impl MyApp {
                             let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
                             let rows = (ui.available_height() / line_height).max(1.0) as usize;
 
+                            ui.set_min_width(ui.available_width());
+
                             egui::TextEdit::multiline(&mut self.headers)
                                 .code_editor()
                                 .hint_text("# Key: Value\n# Content-Type: application/json")
@@ -481,6 +485,8 @@ impl MyApp {
 
                         let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
                         let rows = (ui.available_height() / line_height).max(1.0) as usize;
+
+                        ui.set_min_width(ui.available_width());
 
                         ui.add(
                             egui::TextEdit::multiline(&mut text.as_str())
