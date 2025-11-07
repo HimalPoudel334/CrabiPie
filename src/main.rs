@@ -172,6 +172,7 @@ impl MyApp {
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
+                ui.expand_to_include_rect(ui.max_rect());
                 ui.strong("Request");
                 ui.add_space(6.0);
 
@@ -246,7 +247,7 @@ impl MyApp {
                                     let rows =
                                         (ui.available_height() / line_height).max(1.0) as usize;
 
-                                    ui.set_min_width(ui.available_width());
+                                    ui.expand_to_include_rect(ui.max_rect());
 
                                     egui::TextEdit::multiline(&mut self.body)
                                         .code_editor()
@@ -397,7 +398,7 @@ impl MyApp {
                             let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
                             let rows = (ui.available_height() / line_height).max(1.0) as usize;
 
-                            ui.set_min_width(ui.available_width());
+                            ui.expand_to_include_rect(ui.max_rect());
 
                             egui::TextEdit::multiline(&mut self.headers)
                                 .code_editor()
@@ -450,6 +451,7 @@ impl MyApp {
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
+                ui.expand_to_include_rect(ui.max_rect());
                 ui.horizontal(|ui| {
                     ui.strong("Response");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -485,9 +487,7 @@ impl MyApp {
 
                         let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
                         let rows = (ui.available_height() / line_height).max(1.0) as usize;
-
-                        ui.set_min_width(ui.available_width());
-
+                        ui.expand_to_include_rect(ui.max_rect());
                         ui.add(
                             egui::TextEdit::multiline(&mut text.as_str())
                                 .code_editor()
@@ -754,6 +754,7 @@ impl eframe::App for MyApp {
                     // Method dropdown
                     egui::ComboBox::from_id_salt("method")
                         .selected_text(format!("{:?}", self.method))
+                        .width(100.0)
                         .show_ui(ui, |ui| {
                             for method in &[
                                 HttpMethod::GET,
@@ -770,27 +771,33 @@ impl eframe::App for MyApp {
                             }
                         });
 
-                    // URL input: takes all remaining space
-                    let url_response = ui.add_sized(
-                        ui.available_size(),
-                        egui::TextEdit::singleline(&mut self.url)
-                            .hint_text("https://api.example.com/endpoint"),
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Send button with proper minimum size
+                        let send_button = ui.add_enabled(
+                            !self.loading,
+                            egui::Button::new("Send").min_size(egui::vec2(80.0, 0.0)),
+                        );
 
-                    // Send button
-                    let send_button = ui.add_enabled(!self.loading, egui::Button::new("Send"));
-                    if send_button.clicked()
-                        || (url_response.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                    {
-                        self.send_request();
-                    }
+                        // URL input - expands to fill available space
+                        let url_response = ui.add(
+                            egui::TextEdit::singleline(&mut self.url)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("https://api.example.com/endpoint"),
+                        );
+
+                        if send_button.clicked()
+                            || (url_response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                && !self.url.is_empty()
+                        {
+                            self.send_request();
+                        }
+                    });
                 });
             });
 
             ui.add_space(12.0);
 
-            // Responsive Layout: Horizontal (split) or Vertical (stacked)
             match self.layout_mode {
                 LayoutMode::Horizontal => {
                     StripBuilder::new(ui)
