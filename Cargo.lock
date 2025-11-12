@@ -766,6 +766,7 @@ dependencies = [
 name = "crabipi"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "eframe",
  "egui",
  "egui_extras",

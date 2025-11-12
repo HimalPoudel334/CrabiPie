@@ -1,6 +1,10 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use eframe::egui;
+use egui::IconData;
 use egui_extras::{Size, StripBuilder};
 use std::sync::mpsc::{self, Receiver, Sender};
+
+const CRABIPIE_ICON_BASE64: &str = "place a base64 encoded png string here";
 
 #[derive(PartialEq)]
 enum RequestTab {
@@ -810,9 +814,11 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size((1500.0, 900.0))
-            .with_min_inner_size((285.0, 250.0)),
+            .with_min_inner_size((285.0, 250.0))
+            .with_icon(load_icon_from_base64()),
         ..eframe::NativeOptions::default()
     };
+
     eframe::run_native(
         MyApp::name(),
         native_options,
@@ -940,4 +946,23 @@ impl eframe::App for MyApp {
             ctx.request_repaint();
         }
     }
+}
+
+fn load_icon_from_base64() -> IconData {
+    // Decode base64 string to bytes
+    let icon_bytes = base64_decode(CRABIPIE_ICON_BASE64).expect("Failed to decode base64 icon");
+
+    // Use image_crate feature from eframe to decode PNG
+    let image = egui_extras::image::load_image_bytes(&icon_bytes).expect("Failed to load icon");
+
+    IconData {
+        rgba: image.as_raw().to_vec(),
+        width: image.width() as u32,
+        height: image.height() as u32,
+    }
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(input).ok()
 }
