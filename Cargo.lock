@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "CrabiPie"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "opener",
+ "reqwest",
+ "rfd",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -760,21 +775,6 @@ dependencies = [
  "bitflags 2.10.0",
  "core-foundation 0.10.1",
  "libc",
-]
-
-[[package]]
-name = "crabipi"
-version = "0.1.0"
-dependencies = [
- "base64",
- "eframe",
- "egui",
- "egui_extras",
- "opener",
- "reqwest",
- "rfd",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
