@@ -267,10 +267,22 @@ impl MyApp {
 
                                     ui.expand_to_include_rect(ui.max_rect());
 
+                                    // egui::TextEdit::multiline(&mut self.body)
+                                    //     .code_editor()
+                                    //     .desired_width(f32::INFINITY)
+                                    //     .desired_rows(rows)
+                                    //     .show(ui);
+
                                     egui::TextEdit::multiline(&mut self.body)
                                         .code_editor()
                                         .desired_width(f32::INFINITY)
                                         .desired_rows(rows)
+                                        .layouter(&mut |ui, text, wrap_width| {
+                                            let mut job = highlight_json(text.as_str());
+                                            job.wrap.max_width = wrap_width;
+
+                                            ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+                                        })
                                         .show(ui);
                                 }
                                 ContentType::FormData => {
@@ -547,11 +559,18 @@ impl MyApp {
                         let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
                         let rows = (ui.available_height() / line_height).max(1.0) as usize;
                         ui.expand_to_include_rect(ui.max_rect());
+
                         ui.add(
                             egui::TextEdit::multiline(&mut text.as_str())
                                 .code_editor()
                                 .desired_width(f32::INFINITY)
-                                .desired_rows(rows),
+                                .desired_rows(rows)
+                                .layouter(&mut |ui, text, wrap_width| {
+                                    let mut job = highlight_json(text.as_str());
+                                    job.wrap.max_width = wrap_width;
+
+                                    ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+                                }),
                         );
                     });
             });
@@ -965,4 +984,162 @@ fn load_icon_from_base64() -> IconData {
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(input).ok()
+}
+
+fn highlight_json(text: &str) -> egui::text::LayoutJob {
+    use egui::text::LayoutJob;
+    use egui::{Color32, TextFormat};
+
+    const KEY_COLOR: Color32 = Color32::from_rgb(120, 180, 255); // light blue
+    const VALUE_STR_COLOR: Color32 = Color32::from_rgb(255, 200, 120); // light orange
+    const NUMBER_COLOR: Color32 = Color32::YELLOW;
+    const KEYWORD_COLOR: Color32 = Color32::LIGHT_RED;
+    const PUNCT_COLOR: Color32 = Color32::LIGHT_BLUE;
+    const DEFAULT_COLOR: Color32 = Color32::WHITE;
+
+    let mut job = LayoutJob::default();
+    let mut i = 0;
+
+    while i < text.len() {
+        let rest = &text[i..];
+        let ch = rest.chars().next().unwrap();
+
+        // ------------------------------------------------------------
+        // STRING (key or value)
+        // ------------------------------------------------------------
+        if ch == '"' {
+            let mut end = i + 1;
+            let mut escape = false;
+
+            while end < text.len() {
+                let c = text[end..].chars().next().unwrap();
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    end += c.len_utf8();
+                    break;
+                }
+                end += c.len_utf8();
+            }
+
+            let token = &text[i..end];
+
+            // Determine if key: look ahead past whitespace
+            let mut next_idx = end;
+            while next_idx < text.len() {
+                let c = text[next_idx..].chars().next().unwrap();
+                if c.is_whitespace() {
+                    next_idx += c.len_utf8();
+                    continue;
+                }
+                break;
+            }
+
+            let is_key = next_idx < text.len() && text[next_idx..].starts_with(':');
+
+            let color = if is_key { KEY_COLOR } else { VALUE_STR_COLOR };
+
+            job.append(
+                token,
+                0.0,
+                TextFormat {
+                    color,
+                    ..Default::default()
+                },
+            );
+
+            i = end;
+            continue;
+        }
+
+        // ------------------------------------------------------------
+        // NUMBER
+        // ------------------------------------------------------------
+        if ch.is_ascii_digit() || ch == '-' {
+            let mut end = i + ch.len_utf8();
+            while end < text.len() {
+                let c = text[end..].chars().next().unwrap();
+                if !(c.is_ascii_digit() || c == '.') {
+                    break;
+                }
+                end += c.len_utf8();
+            }
+
+            let token = &text[i..end];
+            job.append(
+                token,
+                0.0,
+                TextFormat {
+                    color: NUMBER_COLOR,
+                    ..Default::default()
+                },
+            );
+
+            i = end;
+            continue;
+        }
+
+        // ------------------------------------------------------------
+        // KEYWORDS: true | false | null
+        // ------------------------------------------------------------
+        if rest.starts_with("true") {
+            job.append(
+                "true",
+                0.0,
+                TextFormat {
+                    color: KEYWORD_COLOR,
+                    ..Default::default()
+                },
+            );
+            i += 4;
+            continue;
+        }
+        if rest.starts_with("false") {
+            job.append(
+                "false",
+                0.0,
+                TextFormat {
+                    color: KEYWORD_COLOR,
+                    ..Default::default()
+                },
+            );
+            i += 5;
+            continue;
+        }
+        if rest.starts_with("null") {
+            job.append(
+                "null",
+                0.0,
+                TextFormat {
+                    color: KEYWORD_COLOR,
+                    ..Default::default()
+                },
+            );
+            i += 4;
+            continue;
+        }
+
+        // ------------------------------------------------------------
+        // PUNCTUATION
+        // ------------------------------------------------------------
+        let color = match ch {
+            '{' | '}' | '[' | ']' | ':' | ',' => PUNCT_COLOR,
+            _ => DEFAULT_COLOR,
+        };
+
+        job.append(
+            &ch.to_string(),
+            0.0,
+            TextFormat {
+                color,
+                ..Default::default()
+            },
+        );
+
+        i += ch.len_utf8();
+    }
+
+    job
 }
