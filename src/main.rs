@@ -71,6 +71,43 @@ struct HttpResponse {
     content_type: String,
 }
 
+#[derive(PartialEq)]
+enum FindContext {
+    None,
+    RequestBody,
+    ResponseBody,
+}
+
+struct FindDialog {
+    open: bool,
+    replace_mode: bool,
+    find_text: String,
+    replace_text: String,
+    case_sensitive: bool,
+    whole_word: bool,
+    context: FindContext,
+    current_match: usize,
+    total_matches: usize,
+    current_match_pos: Option<usize>,
+}
+
+impl Default for FindDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            replace_mode: false,
+            find_text: String::new(),
+            replace_text: String::new(),
+            case_sensitive: false,
+            whole_word: false,
+            context: FindContext::None,
+            current_match: 0,
+            total_matches: 0,
+            current_match_pos: None,
+        }
+    }
+}
+
 struct MyApp {
     // Request configuration
     url: String,
@@ -96,6 +133,9 @@ struct MyApp {
     active_request_tab: RequestTab,
     active_response_tab: ResponseTab,
     layout_mode: LayoutMode,
+
+    //UI elements
+    find_dialog: FindDialog,
 
     // Communication channel for async requests
     tx: Sender<HttpResponse>,
@@ -127,6 +167,7 @@ impl Default for MyApp {
             layout_mode: LayoutMode::Horizontal,
             active_request_tab: RequestTab::Body,
             active_response_tab: ResponseTab::None,
+            find_dialog: FindDialog::default(),
             auth_type: AuthType::None,
             bearer_token: String::new(),
             content_type: ContentType::Json,
@@ -267,29 +308,33 @@ impl MyApp {
 
                                     ui.expand_to_include_rect(ui.max_rect());
 
-                                    // egui::TextEdit::multiline(&mut self.body)
-                                    //     .code_editor()
-                                    //     .desired_width(f32::INFINITY)
-                                    //     .desired_rows(rows)
-                                    //     .show(ui);
-
-                                    egui::TextEdit::multiline(&mut self.body)
-                                        .code_editor()
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(rows)
-                                        .layouter(&mut |ui, text, wrap_width| {
-                                            let mut job = highlight_json(text.as_str());
-                                            job.wrap.max_width = wrap_width;
-
-                                            ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
-                                        })
-                                        .show(ui);
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut self.body)
+                                            .code_editor()
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(rows)
+                                            .layouter(&mut |ui, text, wrap_width| {
+                                                let mut job = if self.find_dialog.context
+                                                    == FindContext::RequestBody
+                                                    && !self.find_dialog.find_text.is_empty()
+                                                {
+                                                    highlight_json_with_search(
+                                                        text.as_str(),
+                                                        &self.find_dialog.find_text,
+                                                        self.find_dialog.current_match_pos,
+                                                        self.find_dialog.case_sensitive,
+                                                    )
+                                                } else {
+                                                    highlight_json(text.as_str())
+                                                };
+                                                job.wrap.max_width = wrap_width;
+                                                ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+                                            }),
+                                    );
                                 }
                                 ContentType::FormData => {
-                                    // Limit how wide this section can expand to avoid pushing other panels
                                     ui.set_max_width(ui.available_width());
 
-                                    // Make it scrollable so tall forms don’t push other layouts
                                     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(
                                         ui,
                                         |ui| {
@@ -425,6 +470,11 @@ impl MyApp {
                                     );
                                 }
                             });
+
+                        // Detect focus for find context
+                        if ui.memory(|mem| mem.focused().is_some()) {
+                            self.find_dialog.context = FindContext::RequestBody;
+                        }
                     }
                     RequestTab::Headers => {
                         let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
@@ -556,6 +606,11 @@ impl MyApp {
                             ResponseTab::None => return,
                         };
 
+                        // Detect focus for find context
+                        if ui.memory(|mem| mem.focused().is_some()) {
+                            self.find_dialog.context = FindContext::ResponseBody;
+                        }
+
                         let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
                         let rows = (ui.available_height() / line_height).max(1.0) as usize;
                         ui.expand_to_include_rect(ui.max_rect());
@@ -565,10 +620,21 @@ impl MyApp {
                                 .code_editor()
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(rows)
-                                .layouter(&mut |ui, text, wrap_width| {
-                                    let mut job = highlight_json(text.as_str());
+                                .layouter(&mut |ui, etext, wrap_width| {
+                                    let mut job = if self.find_dialog.context
+                                        == FindContext::ResponseBody
+                                        && !self.find_dialog.find_text.is_empty()
+                                    {
+                                        highlight_json_with_search(
+                                            etext.as_str(),
+                                            &self.find_dialog.find_text,
+                                            self.find_dialog.current_match_pos,
+                                            self.find_dialog.case_sensitive,
+                                        )
+                                    } else {
+                                        highlight_json(etext.as_str())
+                                    };
                                     job.wrap.max_width = wrap_width;
-
                                     ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
                                 }),
                         );
@@ -827,6 +893,312 @@ impl MyApp {
             let _ = tx.send(response);
         });
     }
+
+    fn render_find_dialog(&mut self, ctx: &egui::Context) {
+        if !self.find_dialog.open {
+            return;
+        }
+
+        egui::Window::new(if self.find_dialog.replace_mode {
+            "Find and Replace"
+        } else {
+            "Find"
+        })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 50.0))
+        .show(ctx, |ui| {
+            // Find input
+            ui.horizontal(|ui| {
+                ui.label("Find:");
+                let find_response = ui.add(
+                    egui::TextEdit::singleline(&mut self.find_dialog.find_text)
+                        .desired_width(200.0),
+                );
+
+                if !find_response.gained_focus() {
+                    find_response.request_focus();
+                }
+
+                // Auto-update match count while typing
+                if find_response.changed() {
+                    let text = self.get_search_text().to_string();
+                    let matches = self.find_matches(&text, &self.find_dialog.find_text);
+                    self.find_dialog.total_matches = matches.len();
+                    self.find_dialog.current_match = if matches.is_empty() { 0 } else { 1 };
+                }
+
+                // Enter key to find next
+                if !find_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.find_next();
+                }
+            });
+
+            // Replace input (only in replace mode)
+            if self.find_dialog.replace_mode {
+                ui.horizontal(|ui| {
+                    ui.label("Replace:");
+                    let replace_response = ui.add(
+                        egui::TextEdit::singleline(&mut self.find_dialog.replace_text)
+                            .desired_width(200.0),
+                    );
+
+                    // Enter key to replace current
+                    if replace_response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        self.replace_current();
+                    }
+                });
+            }
+
+            ui.add_space(4.0);
+
+            // Options
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.find_dialog.case_sensitive, "Case sensitive");
+                ui.checkbox(&mut self.find_dialog.whole_word, "Whole word");
+            });
+
+            ui.add_space(4.0);
+
+            // Buttons
+            ui.horizontal(|ui| {
+                if ui.button("⬆ Previous").clicked() {
+                    self.find_previous();
+                }
+                if ui.button("⬇ Next").clicked() {
+                    self.find_next();
+                }
+
+                if self.find_dialog.replace_mode {
+                    ui.separator();
+                    if ui.button("Replace").clicked() {
+                        self.replace_current();
+                    }
+                    if ui.button("Replace All").clicked() {
+                        self.replace_all();
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✖").clicked() {
+                        self.find_dialog.open = false;
+                    }
+                });
+            });
+
+            // Show match count with better styling
+            if !self.find_dialog.find_text.is_empty() {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                if self.find_dialog.total_matches > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} / {} matches",
+                            self.find_dialog.current_match, self.find_dialog.total_matches
+                        ))
+                        .color(egui::Color32::from_rgb(100, 200, 100)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("No matches found")
+                            .color(egui::Color32::from_rgb(200, 100, 100)),
+                    );
+                }
+            }
+        });
+    }
+
+    fn get_search_text(&self) -> &str {
+        match self.find_dialog.context {
+            FindContext::RequestBody => &self.body,
+            FindContext::ResponseBody => &self.response_body,
+            FindContext::None => "",
+        }
+    }
+
+    fn get_search_text_mut(&mut self) -> &mut String {
+        match self.find_dialog.context {
+            FindContext::RequestBody => &mut self.body,
+            FindContext::ResponseBody => &mut self.response_body,
+            FindContext::None => &mut self.body, // fallback
+        }
+    }
+
+    fn find_matches(&self, text: &str, pattern: &str) -> Vec<usize> {
+        if pattern.is_empty() {
+            return Vec::new();
+        }
+
+        let mut matches = Vec::new();
+
+        if self.find_dialog.case_sensitive {
+            if self.find_dialog.whole_word {
+                // Case sensitive + whole word
+                let mut start = 0;
+                while let Some(pos) = text[start..].find(pattern) {
+                    let abs_pos = start + pos;
+                    let before =
+                        abs_pos == 0 || !text[..abs_pos].chars().last().unwrap().is_alphanumeric();
+                    let after_pos = abs_pos + pattern.len();
+                    let after = after_pos >= text.len()
+                        || !text[after_pos..].chars().next().unwrap().is_alphanumeric();
+
+                    if before && after {
+                        matches.push(abs_pos);
+                    }
+                    start = abs_pos + 1;
+                }
+            } else {
+                // Case sensitive only
+                let mut start = 0;
+                while let Some(pos) = text[start..].find(pattern) {
+                    matches.push(start + pos);
+                    start += pos + 1;
+                }
+            }
+        } else {
+            let text_lower = text.to_lowercase();
+            let pattern_lower = pattern.to_lowercase();
+
+            if self.find_dialog.whole_word {
+                // Case insensitive + whole word
+                let mut start = 0;
+                while let Some(pos) = text_lower[start..].find(&pattern_lower) {
+                    let abs_pos = start + pos;
+                    let before =
+                        abs_pos == 0 || !text[..abs_pos].chars().last().unwrap().is_alphanumeric();
+                    let after_pos = abs_pos + pattern.len();
+                    let after = after_pos >= text.len()
+                        || !text[after_pos..].chars().next().unwrap().is_alphanumeric();
+
+                    if before && after {
+                        matches.push(abs_pos);
+                    }
+                    start = abs_pos + 1;
+                }
+            } else {
+                // Case insensitive only
+                let mut start = 0;
+                while let Some(pos) = text_lower[start..].find(&pattern_lower) {
+                    matches.push(start + pos);
+                    start += pos + 1;
+                }
+            }
+        }
+
+        matches
+    }
+
+    fn find_next(&mut self) {
+        let text = self.get_search_text().to_string();
+        let matches = self.find_matches(&text, &self.find_dialog.find_text);
+
+        self.find_dialog.total_matches = matches.len();
+
+        if matches.is_empty() {
+            self.find_dialog.current_match = 0;
+            self.find_dialog.current_match_pos = None;
+        } else {
+            if self.find_dialog.current_match == 0
+                || self.find_dialog.current_match >= matches.len()
+            {
+                self.find_dialog.current_match = 1;
+            } else {
+                self.find_dialog.current_match += 1;
+            }
+
+            // Cycle back to first match if at end
+            if self.find_dialog.current_match > matches.len() {
+                self.find_dialog.current_match = 1;
+            }
+
+            // Store current match position
+            if self.find_dialog.current_match > 0 {
+                self.find_dialog.current_match_pos =
+                    Some(matches[self.find_dialog.current_match - 1]);
+            }
+        }
+    }
+
+    fn replace_current(&mut self) {
+        let text = self.get_search_text().to_string();
+        let find_text = self.find_dialog.find_text.clone();
+        let replace_text = self.find_dialog.replace_text.clone();
+        let matches = self.find_matches(&text, &find_text);
+
+        if matches.is_empty() || self.find_dialog.current_match == 0 {
+            return;
+        }
+
+        let match_idx = self.find_dialog.current_match - 1;
+        if match_idx < matches.len() {
+            let pos = matches[match_idx];
+            let search_text = self.get_search_text_mut();
+
+            search_text.replace_range(pos..pos + find_text.len(), &replace_text);
+
+            // Find next after replace
+            self.find_next();
+        }
+    }
+
+    fn replace_all(&mut self) {
+        let text = self.get_search_text().to_string();
+        let find_text = self.find_dialog.find_text.clone();
+        let replace_text = self.find_dialog.replace_text.clone();
+        let case_sensitive = self.find_dialog.case_sensitive;
+        let search_text = self.get_search_text_mut();
+
+        if case_sensitive {
+            *search_text = text.replace(&find_text, &replace_text);
+        } else {
+            // Case insensitive replace
+            let pattern = find_text.to_lowercase();
+            let mut result = String::new();
+            let text_lower = text.to_lowercase();
+            let mut last_pos = 0;
+
+            while let Some(pos) = text_lower[last_pos..].find(&pattern) {
+                let abs_pos = last_pos + pos;
+                result.push_str(&text[last_pos..abs_pos]);
+                result.push_str(&replace_text);
+                last_pos = abs_pos + find_text.len();
+            }
+            result.push_str(&text[last_pos..]);
+            *search_text = result;
+        }
+
+        self.find_dialog.current_match = 0;
+        self.find_dialog.total_matches = 0;
+    }
+
+    fn find_previous(&mut self) {
+        let text = self.get_search_text().to_string();
+        let matches = self.find_matches(&text, &self.find_dialog.find_text);
+
+        self.find_dialog.total_matches = matches.len();
+
+        if matches.is_empty() {
+            self.find_dialog.current_match = 0;
+            self.find_dialog.current_match_pos = None;
+        } else {
+            if self.find_dialog.current_match == 0 || self.find_dialog.current_match == 1 {
+                self.find_dialog.current_match = matches.len();
+            } else {
+                self.find_dialog.current_match -= 1;
+            }
+
+            // Store current match position
+            if self.find_dialog.current_match > 0 {
+                self.find_dialog.current_match_pos =
+                    Some(matches[self.find_dialog.current_match - 1]);
+            }
+        }
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -859,6 +1231,37 @@ impl eframe::App for MyApp {
             self.loading = false;
             self.active_response_tab = ResponseTab::Body;
         }
+
+        ctx.input(|i| {
+            // Ctrl+F for find
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::F) {
+                self.find_dialog.open = true;
+                self.find_dialog.replace_mode = false;
+            }
+
+            // Ctrl+H for find and replace
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::H) {
+                self.find_dialog.open = true;
+                self.find_dialog.replace_mode = true;
+            }
+
+            // F3 for find next
+            if i.key_pressed(egui::Key::F3) && self.find_dialog.open {
+                self.find_next();
+            }
+
+            // Shift+F3 for find previous
+            if i.modifiers.shift && i.key_pressed(egui::Key::F3) && self.find_dialog.open {
+                self.find_previous();
+            }
+
+            // ESC to close find dialog
+            if i.key_pressed(egui::Key::Escape) && self.find_dialog.open {
+                self.find_dialog.open = false;
+            }
+        });
+
+        self.render_find_dialog(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // Header: Title + Layout Toggle
@@ -990,8 +1393,8 @@ fn highlight_json(text: &str) -> egui::text::LayoutJob {
     use egui::text::LayoutJob;
     use egui::{Color32, TextFormat};
 
-    const KEY_COLOR: Color32 = Color32::from_rgb(120, 180, 255); // light blue
-    const VALUE_STR_COLOR: Color32 = Color32::from_rgb(255, 200, 120); // light orange
+    const KEY_COLOR: Color32 = Color32::from_rgb(120, 180, 255);
+    const VALUE_STR_COLOR: Color32 = Color32::from_rgb(255, 200, 120);
     const NUMBER_COLOR: Color32 = Color32::YELLOW;
     const KEYWORD_COLOR: Color32 = Color32::LIGHT_RED;
     const PUNCT_COLOR: Color32 = Color32::LIGHT_BLUE;
@@ -1004,9 +1407,6 @@ fn highlight_json(text: &str) -> egui::text::LayoutJob {
         let rest = &text[i..];
         let ch = rest.chars().next().unwrap();
 
-        // ------------------------------------------------------------
-        // STRING (key or value)
-        // ------------------------------------------------------------
         if ch == '"' {
             let mut end = i + 1;
             let mut escape = false;
@@ -1054,9 +1454,6 @@ fn highlight_json(text: &str) -> egui::text::LayoutJob {
             continue;
         }
 
-        // ------------------------------------------------------------
-        // NUMBER
-        // ------------------------------------------------------------
         if ch.is_ascii_digit() || ch == '-' {
             let mut end = i + ch.len_utf8();
             while end < text.len() {
@@ -1081,9 +1478,6 @@ fn highlight_json(text: &str) -> egui::text::LayoutJob {
             continue;
         }
 
-        // ------------------------------------------------------------
-        // KEYWORDS: true | false | null
-        // ------------------------------------------------------------
         if rest.starts_with("true") {
             job.append(
                 "true",
@@ -1121,9 +1515,197 @@ fn highlight_json(text: &str) -> egui::text::LayoutJob {
             continue;
         }
 
-        // ------------------------------------------------------------
-        // PUNCTUATION
-        // ------------------------------------------------------------
+        let color = match ch {
+            '{' | '}' | '[' | ']' | ':' | ',' => PUNCT_COLOR,
+            _ => DEFAULT_COLOR,
+        };
+
+        job.append(
+            &ch.to_string(),
+            0.0,
+            TextFormat {
+                color,
+                ..Default::default()
+            },
+        );
+
+        i += ch.len_utf8();
+    }
+
+    job
+}
+
+fn highlight_json_with_search(
+    text: &str,
+    search_text: &str,
+    search_pos: Option<usize>,
+    case_sensitive: bool,
+) -> egui::text::LayoutJob {
+    use egui::text::LayoutJob;
+    use egui::{Color32, TextFormat};
+
+    const KEY_COLOR: Color32 = Color32::from_rgb(120, 180, 255);
+    const VALUE_STR_COLOR: Color32 = Color32::from_rgb(255, 200, 120);
+    const NUMBER_COLOR: Color32 = Color32::YELLOW;
+    const KEYWORD_COLOR: Color32 = Color32::LIGHT_RED;
+    const PUNCT_COLOR: Color32 = Color32::LIGHT_BLUE;
+    const DEFAULT_COLOR: Color32 = Color32::WHITE;
+    const HIGHLIGHT_BG: Color32 = Color32::from_rgb(255, 255, 0);
+    const HIGHLIGHT_TEXT: Color32 = Color32::BLACK;
+
+    let mut job = LayoutJob::default();
+
+    // First, get all search matches
+    let mut search_matches = Vec::new();
+    if !search_text.is_empty() {
+        let search_lower = search_text.to_lowercase();
+        let text_lower = text.to_lowercase();
+        let mut start = 0;
+
+        while let Some(pos) = if case_sensitive {
+            text[start..].find(search_text)
+        } else {
+            text_lower[start..].find(&search_lower)
+        } {
+            search_matches.push(start + pos);
+            start += pos + 1;
+        }
+    }
+
+    let mut i = 0;
+
+    while i < text.len() {
+        // Check if we're at a search match position
+        let is_current_match = search_pos.map_or(false, |pos| i == pos);
+        let is_any_match = search_matches.contains(&i);
+
+        if is_any_match && !search_text.is_empty() {
+            let token = &text[i..i + search_text.len()];
+            job.append(
+                token,
+                0.0,
+                TextFormat {
+                    color: HIGHLIGHT_TEXT,
+                    background: if is_current_match {
+                        Color32::from_rgb(255, 165, 0) // Orange for current
+                    } else {
+                        HIGHLIGHT_BG // Yellow for others
+                    },
+                    ..Default::default()
+                },
+            );
+            i += search_text.len();
+            continue;
+        }
+
+        let rest = &text[i..];
+        let ch = rest.chars().next().unwrap();
+
+        if ch == '"' {
+            let mut end = i + 1;
+            let mut escape = false;
+
+            while end < text.len() {
+                let c = text[end..].chars().next().unwrap();
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    end += c.len_utf8();
+                    break;
+                }
+                end += c.len_utf8();
+            }
+
+            let token = &text[i..end];
+            let mut next_idx = end;
+            while next_idx < text.len() {
+                let c = text[next_idx..].chars().next().unwrap();
+                if c.is_whitespace() {
+                    next_idx += c.len_utf8();
+                    continue;
+                }
+                break;
+            }
+
+            let is_key = next_idx < text.len() && text[next_idx..].starts_with(':');
+            let color = if is_key { KEY_COLOR } else { VALUE_STR_COLOR };
+
+            job.append(
+                token,
+                0.0,
+                TextFormat {
+                    color,
+                    ..Default::default()
+                },
+            );
+
+            i = end;
+            continue;
+        }
+
+        if ch.is_ascii_digit() || ch == '-' {
+            let mut end = i + ch.len_utf8();
+            while end < text.len() {
+                let c = text[end..].chars().next().unwrap();
+                if !(c.is_ascii_digit() || c == '.') {
+                    break;
+                }
+                end += c.len_utf8();
+            }
+
+            let token = &text[i..end];
+            job.append(
+                token,
+                0.0,
+                TextFormat {
+                    color: NUMBER_COLOR,
+                    ..Default::default()
+                },
+            );
+
+            i = end;
+            continue;
+        }
+
+        if rest.starts_with("true") {
+            job.append(
+                "true",
+                0.0,
+                TextFormat {
+                    color: KEYWORD_COLOR,
+                    ..Default::default()
+                },
+            );
+            i += 4;
+            continue;
+        }
+        if rest.starts_with("false") {
+            job.append(
+                "false",
+                0.0,
+                TextFormat {
+                    color: KEYWORD_COLOR,
+                    ..Default::default()
+                },
+            );
+            i += 5;
+            continue;
+        }
+        if rest.starts_with("null") {
+            job.append(
+                "null",
+                0.0,
+                TextFormat {
+                    color: KEYWORD_COLOR,
+                    ..Default::default()
+                },
+            );
+            i += 4;
+            continue;
+        }
+
         let color = match ch {
             '{' | '}' | '[' | ']' | ':' | ',' => PUNCT_COLOR,
             _ => DEFAULT_COLOR,
