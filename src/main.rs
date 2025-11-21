@@ -366,8 +366,9 @@ impl MyApp {
                                             .desired_width(f32::INFINITY)
                                             .desired_rows(rows)
                                             .layouter(&mut |ui, text, wrap_width| {
-                                                let job = if self.find_dialog.context
-                                                    == FindContext::RequestBody
+                                                let job = if self.find_dialog.open
+                                                    && self.find_dialog.context
+                                                        == FindContext::RequestBody
                                                     && !self.find_dialog.find_text.is_empty()
                                                 {
                                                     MyApp::memoized_highlight_json(
@@ -684,7 +685,8 @@ impl MyApp {
 
                     let mut layouter =
                         |ui: &egui::Ui, buffer_text: &dyn egui::TextBuffer, wrap_width: f32| {
-                            let job = if self.find_dialog.context == FindContext::ResponseBody
+                            let job = if self.find_dialog.open
+                                && self.find_dialog.context == FindContext::ResponseBody
                                 && !self.find_dialog.find_text.is_empty()
                             {
                                 MyApp::memoized_highlight_json(
@@ -725,17 +727,12 @@ impl MyApp {
                                 .filter(|c| *c == '\n')
                                 .count();
 
-                            // Calculate Y position (with some margin to center it)
-                            let target_y = ((line_number as f32 * line_height)
-                                - (ui.available_height() / 4.0))
-                                .max(0.0);
-
-                            self.find_dialog.target_scroll_y = Some(target_y);
+                            // Position match near the top (small offset for padding)
+                            let target_y = (line_number as f32 * line_height) - (line_height * 2.0);
 
                             self.find_dialog.target_scroll_y = Some(target_y.max(0.0));
                             self.find_dialog.scroll_to_match = false;
 
-                            // Request repaint to apply the scroll
                             ui.ctx().request_repaint();
                         }
                     }
@@ -997,6 +994,11 @@ impl MyApp {
 
     fn render_find_dialog(&mut self, ctx: &egui::Context) {
         if !self.find_dialog.open {
+            if self.find_dialog.current_match_pos.is_some() {
+                self.find_dialog.current_match_pos = None;
+                self.find_dialog.current_match = 0;
+                self.find_dialog.total_matches = 0;
+            }
             return;
         }
 
@@ -1085,6 +1087,9 @@ impl MyApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("✖").clicked() {
                         self.find_dialog.open = false;
+                        self.find_dialog.current_match_pos = None;
+                        self.find_dialog.current_match = 0;
+                        self.find_dialog.total_matches = 0;
                     }
                 });
             });
@@ -1195,6 +1200,10 @@ impl MyApp {
     }
 
     fn find_next(&mut self) {
+        if !self.find_dialog.open {
+            return;
+        }
+
         let text = self.get_search_text().to_string();
         let matches = self.find_matches(&text, &self.find_dialog.find_text);
         self.find_dialog.total_matches = matches.len();
@@ -1355,6 +1364,9 @@ impl eframe::App for MyApp {
             // ESC to close find dialog
             if i.key_pressed(egui::Key::Escape) && self.find_dialog.open {
                 self.find_dialog.open = false;
+                self.find_dialog.current_match_pos = None;
+                self.find_dialog.current_match = 0;
+                self.find_dialog.total_matches = 0;
             }
         });
 
@@ -1614,9 +1626,9 @@ fn highlight_json_with_search(
                 TextFormat {
                     color: HIGHLIGHT_TEXT,
                     background: if is_current_match {
-                        Color32::from_rgb(255, 165, 0) // Orange for current
+                        Color32::from_rgb(255, 165, 0)
                     } else {
-                        HIGHLIGHT_BG // Yellow for others
+                        HIGHLIGHT_BG
                     },
                     ..Default::default()
                 },
@@ -1661,6 +1673,7 @@ fn highlight_json_with_search(
             i += 4;
             continue;
         }
+
         if rest.starts_with("false") {
             job.append(
                 "false",
@@ -1673,6 +1686,7 @@ fn highlight_json_with_search(
             i += 5;
             continue;
         }
+
         if rest.starts_with("null") {
             job.append(
                 "null",
