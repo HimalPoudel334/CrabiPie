@@ -103,6 +103,7 @@ struct FindDialog {
     total_matches: usize,
     current_match_pos: Option<usize>,
     scroll_to_match: bool,
+    target_scroll_y: Option<f32>,
 }
 
 impl Default for FindDialog {
@@ -119,6 +120,7 @@ impl Default for FindDialog {
             total_matches: 0,
             current_match_pos: None,
             scroll_to_match: false,
+            target_scroll_y: None,
         }
     }
 }
@@ -618,117 +620,126 @@ impl MyApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                egui::ScrollArea::vertical()
-                    .id_salt("response_scroll")
-                    .show(ui, |ui| {
-                        if self.active_response_tab == ResponseTab::None {
-                            return;
-                        }
+                // Calculate scroll offset if we need to scroll to a match
+                let scroll_y = self.find_dialog.target_scroll_y.take();
 
-                        if self.active_response_tab == ResponseTab::Body && self.is_response_binary
-                        {
-                            if !self.response_bytes.is_empty() {
-                                if self.response_content_type.starts_with("image/") {
-                                    ui.image(egui::ImageSource::Bytes {
-                                        uri: format!("bytes://{}", self.response_filename).into(),
-                                        bytes: egui::load::Bytes::from(self.response_bytes.clone()),
-                                    });
-                                } else {
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(255, 165, 0),
-                                        format!(
-                                            "📄 Binary file received: {}",
-                                            self.response_filename
-                                        ),
-                                    );
-                                    ui.label(&self.response_body);
-                                    ui.add_space(8.0);
+                let mut scroll_area = egui::ScrollArea::vertical().id_salt("response_scroll");
 
-                                    if ui.button("💾 Save and Open").clicked() {
-                                        if let Some(path) = rfd::FileDialog::new()
-                                            .set_file_name(&self.response_filename)
-                                            .save_file()
-                                        {
-                                            if std::fs::write(&path, &self.response_bytes).is_ok() {
-                                                let _ = opener::open(&path);
-                                            }
+                if let Some(y) = scroll_y {
+                    scroll_area = scroll_area.vertical_scroll_offset(y);
+                }
+
+                scroll_area.show(ui, |ui| {
+                    if self.active_response_tab == ResponseTab::None {
+                        return;
+                    }
+
+                    if self.active_response_tab == ResponseTab::Body && self.is_response_binary {
+                        // ... binary handling code unchanged ...
+                        if !self.response_bytes.is_empty() {
+                            if self.response_content_type.starts_with("image/") {
+                                ui.image(egui::ImageSource::Bytes {
+                                    uri: format!("bytes://{}", self.response_filename).into(),
+                                    bytes: egui::load::Bytes::from(self.response_bytes.clone()),
+                                });
+                            } else {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(255, 165, 0),
+                                    format!("📄 Binary file received: {}", self.response_filename),
+                                );
+                                ui.label(&self.response_body);
+                                ui.add_space(8.0);
+
+                                if ui.button("💾 Save and Open").clicked() {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .set_file_name(&self.response_filename)
+                                        .save_file()
+                                    {
+                                        if std::fs::write(&path, &self.response_bytes).is_ok() {
+                                            let _ = opener::open(&path);
                                         }
                                     }
                                 }
                             }
-                            return;
                         }
+                        return;
+                    }
 
-                        let text = match self.active_response_tab {
-                            ResponseTab::Body => &self.response_body,
-                            ResponseTab::Headers => &self.response_headers,
-                            ResponseTab::None => return,
+                    let text = match self.active_response_tab {
+                        ResponseTab::Body => &self.response_body,
+                        ResponseTab::Headers => &self.response_headers,
+                        ResponseTab::None => return,
+                    };
+
+                    // Detect focus for find context
+                    if ui.memory(|mem| mem.focused().is_some()) {
+                        self.find_dialog.context = FindContext::ResponseBody;
+                    }
+
+                    let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                    let rows = (ui.available_height() / line_height).max(1.0) as usize;
+                    ui.expand_to_include_rect(ui.max_rect());
+
+                    let text_str = text.as_str();
+
+                    let mut layouter =
+                        |ui: &egui::Ui, buffer_text: &dyn egui::TextBuffer, wrap_width: f32| {
+                            let job = if self.find_dialog.context == FindContext::ResponseBody
+                                && !self.find_dialog.find_text.is_empty()
+                            {
+                                MyApp::memoized_highlight_json(
+                                    &self.highlight_cache,
+                                    buffer_text.as_str(),
+                                    &self.find_dialog.find_text,
+                                    self.find_dialog.current_match_pos,
+                                    self.find_dialog.case_sensitive,
+                                )
+                            } else {
+                                MyApp::memoized_highlight_json(
+                                    &self.highlight_cache,
+                                    buffer_text.as_str(),
+                                    "",
+                                    None,
+                                    false,
+                                )
+                            };
+                            let mut job = job;
+                            job.wrap.max_width = wrap_width;
+                            ui.fonts_mut(|f| f.layout_job(job))
                         };
 
-                        // Detect focus for find context
-                        if ui.memory(|mem| mem.focused().is_some()) {
-                            self.find_dialog.context = FindContext::ResponseBody;
+                    ui.add(
+                        egui::TextEdit::multiline(&mut &*text_str)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(rows)
+                            .layouter(&mut layouter),
+                    );
+
+                    // Calculate scroll position if needed
+                    if self.find_dialog.scroll_to_match {
+                        if let Some(match_pos) = self.find_dialog.current_match_pos {
+                            // Calculate line number from byte position
+                            let line_number = text_str[..match_pos.min(text_str.len())]
+                                .chars()
+                                .filter(|c| *c == '\n')
+                                .count();
+
+                            // Calculate Y position (with some margin to center it)
+                            let target_y = ((line_number as f32 * line_height)
+                                - (ui.available_height() / 4.0))
+                                .max(0.0);
+
+                            self.find_dialog.target_scroll_y = Some(target_y);
+
+                            self.find_dialog.target_scroll_y = Some(target_y.max(0.0));
+                            self.find_dialog.scroll_to_match = false;
+
+                            // Request repaint to apply the scroll
+                            ui.ctx().request_repaint();
                         }
-
-                        let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
-                        let rows = (ui.available_height() / line_height).max(1.0) as usize;
-                        ui.expand_to_include_rect(ui.max_rect());
-
-                        let text_str = text.as_str();
-                        let text_edit_id = ui.make_persistent_id("response_body_editor");
-
-                        let mut layouter =
-                            |ui: &egui::Ui, buffer_text: &dyn egui::TextBuffer, wrap_width: f32| {
-                                let job = if self.find_dialog.context == FindContext::ResponseBody
-                                    && !self.find_dialog.find_text.is_empty()
-                                {
-                                    MyApp::memoized_highlight_json(
-                                        &self.highlight_cache,
-                                        buffer_text.as_str(),
-                                        &self.find_dialog.find_text,
-                                        self.find_dialog.current_match_pos,
-                                        self.find_dialog.case_sensitive,
-                                    )
-                                } else {
-                                    MyApp::memoized_highlight_json(
-                                        &self.highlight_cache,
-                                        buffer_text.as_str(),
-                                        "",
-                                        None,
-                                        false,
-                                    )
-                                };
-                                let mut job = job;
-                                job.wrap.max_width = wrap_width;
-                                ui.fonts_mut(|f| f.layout_job(job))
-                            };
-
-                        let response = ui.add(
-                            egui::TextEdit::multiline(&mut &*text_str)
-                                .id(text_edit_id)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(rows)
-                                .layouter(&mut layouter),
-                        );
-
-                        // After adding the TextEdit, scroll to match if needed
-                        if self.find_dialog.scroll_to_match {
-                            if let Some(match_pos) = self.find_dialog.current_match_pos {
-                                if let Some(mut state) =
-                                    egui::TextEdit::load_state(ui.ctx(), text_edit_id)
-                                {
-                                    let cursor = egui::text::CCursor::new(match_pos);
-                                    state.cursor.set_char_range(Some(
-                                        egui::text::CCursorRange::one(cursor),
-                                    ));
-                                    state.store(ui.ctx(), text_edit_id);
-                                    response.request_focus();
-                                }
-                                self.find_dialog.scroll_to_match = false;
-                            }
-                        }
-                    });
+                    }
+                });
             });
     }
 
