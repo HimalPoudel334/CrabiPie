@@ -621,7 +621,6 @@ impl MyApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                // Calculate scroll offset if we need to scroll to a match
                 let scroll_y = self.find_dialog.target_scroll_y.take();
 
                 let mut scroll_area = egui::ScrollArea::vertical().id_salt("response_scroll");
@@ -1223,8 +1222,22 @@ impl MyApp {
                 self.find_dialog.current_match = 1;
             }
             if self.find_dialog.current_match > 0 {
-                self.find_dialog.current_match_pos =
-                    Some(matches[self.find_dialog.current_match - 1]);
+                let match_pos = matches[self.find_dialog.current_match - 1];
+                self.find_dialog.current_match_pos = Some(match_pos);
+
+                let line_number = text[..match_pos.min(text.len())]
+                    .chars()
+                    .filter(|c| *c == '\n')
+                    .count();
+
+                println!("line number {line_number}");
+
+                let line_height = 14.0;
+                let target_y = (line_number as f32 * line_height) - line_height * 2.0;
+
+                self.find_dialog.target_scroll_y = Some(target_y.max(0.0));
+
+                println!("target_y {target_y}, with max {}", target_y.max(0.0))
             }
         }
 
