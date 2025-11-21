@@ -2,7 +2,10 @@
 use eframe::egui;
 use egui::IconData;
 use egui_extras::{Size, StripBuilder};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::{
+    collections::HashMap,
+    sync::mpsc::{self, Receiver, Sender},
+};
 
 // const CRABIPIE_ICON_BASE64: &str = "some base64 string here";
 
@@ -73,6 +76,14 @@ struct HttpResponse {
     content_type: String,
 }
 
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct HighlightCacheKey {
+    text: String,
+    search_text: String,
+    search_pos: Option<usize>,
+    case_sensitive: bool,
+}
+
 #[derive(PartialEq)]
 enum FindContext {
     None,
@@ -91,6 +102,7 @@ struct FindDialog {
     current_match: usize,
     total_matches: usize,
     current_match_pos: Option<usize>,
+    scroll_to_match: bool,
 }
 
 impl Default for FindDialog {
@@ -106,6 +118,7 @@ impl Default for FindDialog {
             current_match: 0,
             total_matches: 0,
             current_match_pos: None,
+            scroll_to_match: false,
         }
     }
 }
@@ -135,7 +148,7 @@ struct MyApp {
     active_request_tab: RequestTab,
     active_response_tab: ResponseTab,
     layout_mode: LayoutMode,
-
+    highlight_cache: std::cell::RefCell<HashMap<HighlightCacheKey, egui::text::LayoutJob>>,
     //UI elements
     find_dialog: FindDialog,
 
@@ -166,6 +179,7 @@ impl Default for MyApp {
             response_bytes: Vec::new(),
             response_content_type: String::new(),
             loading: false,
+            highlight_cache: std::cell::RefCell::new(HashMap::new()),
             layout_mode: LayoutMode::Horizontal,
             active_request_tab: RequestTab::Body,
             active_response_tab: ResponseTab::None,
@@ -200,6 +214,40 @@ impl MyApp {
                 self.body = pretty;
             }
         }
+    }
+
+    fn memoized_highlight_json(
+        cache: &std::cell::RefCell<HashMap<HighlightCacheKey, egui::text::LayoutJob>>,
+        text: &str,
+        search_text: &str,
+        search_pos: Option<usize>,
+        case_sensitive: bool,
+    ) -> egui::text::LayoutJob {
+        let key = HighlightCacheKey {
+            text: text.to_string(),
+            search_text: search_text.to_string(),
+            search_pos,
+            case_sensitive,
+        };
+
+        // Try cache first
+        if let Some(cached) = cache.borrow().get(&key) {
+            return cached.clone();
+        }
+
+        // Compute
+        let result = highlight_json_with_search(text, search_text, search_pos, case_sensitive);
+
+        // Insert into cache (evict if too big)
+        {
+            let mut cache_mut = cache.borrow_mut();
+            if cache_mut.len() > 100 {
+                cache_mut.clear();
+            }
+            cache_mut.insert(key, result.clone());
+        }
+
+        result
     }
 
     fn parse_headers(&self) -> reqwest::header::HeaderMap {
@@ -316,21 +364,30 @@ impl MyApp {
                                             .desired_width(f32::INFINITY)
                                             .desired_rows(rows)
                                             .layouter(&mut |ui, text, wrap_width| {
-                                                let mut job = if self.find_dialog.context
+                                                let job = if self.find_dialog.context
                                                     == FindContext::RequestBody
                                                     && !self.find_dialog.find_text.is_empty()
                                                 {
-                                                    highlight_json_with_search(
+                                                    MyApp::memoized_highlight_json(
+                                                        &self.highlight_cache,
                                                         text.as_str(),
                                                         &self.find_dialog.find_text,
                                                         self.find_dialog.current_match_pos,
                                                         self.find_dialog.case_sensitive,
                                                     )
                                                 } else {
-                                                    highlight_json(text.as_str())
+                                                    MyApp::memoized_highlight_json(
+                                                        &self.highlight_cache,
+                                                        text.as_str(),
+                                                        "",
+                                                        None,
+                                                        false,
+                                                    )
                                                 };
+
+                                                let mut job = job;
                                                 job.wrap.max_width = wrap_width;
-                                                ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+                                                ui.fonts_mut(|f| f.layout_job(job))
                                             }),
                                     );
                                 }
@@ -617,29 +674,60 @@ impl MyApp {
                         let rows = (ui.available_height() / line_height).max(1.0) as usize;
                         ui.expand_to_include_rect(ui.max_rect());
 
-                        ui.add(
-                            egui::TextEdit::multiline(&mut text.as_str())
+                        let text_str = text.as_str();
+                        let text_edit_id = ui.make_persistent_id("response_body_editor");
+
+                        let mut layouter =
+                            |ui: &egui::Ui, buffer_text: &dyn egui::TextBuffer, wrap_width: f32| {
+                                let job = if self.find_dialog.context == FindContext::ResponseBody
+                                    && !self.find_dialog.find_text.is_empty()
+                                {
+                                    MyApp::memoized_highlight_json(
+                                        &self.highlight_cache,
+                                        buffer_text.as_str(),
+                                        &self.find_dialog.find_text,
+                                        self.find_dialog.current_match_pos,
+                                        self.find_dialog.case_sensitive,
+                                    )
+                                } else {
+                                    MyApp::memoized_highlight_json(
+                                        &self.highlight_cache,
+                                        buffer_text.as_str(),
+                                        "",
+                                        None,
+                                        false,
+                                    )
+                                };
+                                let mut job = job;
+                                job.wrap.max_width = wrap_width;
+                                ui.fonts_mut(|f| f.layout_job(job))
+                            };
+
+                        let response = ui.add(
+                            egui::TextEdit::multiline(&mut &*text_str)
+                                .id(text_edit_id)
                                 .code_editor()
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(rows)
-                                .layouter(&mut |ui, text, wrap_width| {
-                                    let mut job = if self.find_dialog.context
-                                        == FindContext::ResponseBody
-                                        && !self.find_dialog.find_text.is_empty()
-                                    {
-                                        highlight_json_with_search(
-                                            text.as_str(),
-                                            &self.find_dialog.find_text,
-                                            self.find_dialog.current_match_pos,
-                                            self.find_dialog.case_sensitive,
-                                        )
-                                    } else {
-                                        highlight_json(text.as_str())
-                                    };
-                                    job.wrap.max_width = wrap_width;
-                                    ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
-                                }),
+                                .layouter(&mut layouter),
                         );
+
+                        // After adding the TextEdit, scroll to match if needed
+                        if self.find_dialog.scroll_to_match {
+                            if let Some(match_pos) = self.find_dialog.current_match_pos {
+                                if let Some(mut state) =
+                                    egui::TextEdit::load_state(ui.ctx(), text_edit_id)
+                                {
+                                    let cursor = egui::text::CCursor::new(match_pos);
+                                    state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::one(cursor),
+                                    ));
+                                    state.store(ui.ctx(), text_edit_id);
+                                    response.request_focus();
+                                }
+                                self.find_dialog.scroll_to_match = false;
+                            }
+                        }
                     });
             });
     }
@@ -1099,6 +1187,7 @@ impl MyApp {
         let text = self.get_search_text().to_string();
         let matches = self.find_matches(&text, &self.find_dialog.find_text);
         self.find_dialog.total_matches = matches.len();
+
         if matches.is_empty() {
             self.find_dialog.current_match = 0;
             self.find_dialog.current_match_pos = None;
@@ -1110,16 +1199,16 @@ impl MyApp {
             } else {
                 self.find_dialog.current_match += 1;
             }
-            // Cycle back to first match if at end
             if self.find_dialog.current_match > matches.len() {
                 self.find_dialog.current_match = 1;
             }
-            // Store current match position
             if self.find_dialog.current_match > 0 {
                 self.find_dialog.current_match_pos =
                     Some(matches[self.find_dialog.current_match - 1]);
             }
         }
+
+        self.find_dialog.scroll_to_match = self.find_dialog.current_match_pos.is_some();
     }
 
     fn replace_current(&mut self) {
@@ -1178,6 +1267,7 @@ impl MyApp {
         let text = self.get_search_text().to_string();
         let matches = self.find_matches(&text, &self.find_dialog.find_text);
         self.find_dialog.total_matches = matches.len();
+
         if matches.is_empty() {
             self.find_dialog.current_match = 0;
             self.find_dialog.current_match_pos = None;
@@ -1187,12 +1277,13 @@ impl MyApp {
             } else {
                 self.find_dialog.current_match -= 1;
             }
-            // Store current match position
             if self.find_dialog.current_match > 0 {
                 self.find_dialog.current_match_pos =
                     Some(matches[self.find_dialog.current_match - 1]);
             }
         }
+
+        self.find_dialog.scroll_to_match = self.find_dialog.current_match_pos.is_some();
     }
 }
 
@@ -1382,12 +1473,6 @@ fn load_icon_from_base64() -> IconData {
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(input).ok()
-}
-
-// Simple wrapper that calls the search version with no search
-// Simple wrapper that calls the search version with no search
-fn highlight_json(text: &str) -> egui::text::LayoutJob {
-    highlight_json_with_search(text, "", None, false)
 }
 
 fn highlight_json_with_search(
