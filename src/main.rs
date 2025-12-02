@@ -20,6 +20,7 @@ enum RequestTab {
 enum ContentType {
     Json,
     FormData,
+    FormUrlEncoded,
 }
 
 #[derive(Clone, PartialEq)]
@@ -325,6 +326,8 @@ impl MyApp {
                             egui::ComboBox::from_id_salt("content_type")
                                 .selected_text(if self.content_type == ContentType::Json {
                                     "JSON"
+                                } else if self.content_type == ContentType::FormUrlEncoded {
+                                    "Form Encoded"
                                 } else {
                                     "Form Data"
                                 })
@@ -339,13 +342,18 @@ impl MyApp {
                                         ContentType::FormData,
                                         "Form Data",
                                     );
+                                    ui.selectable_value(
+                                        &mut self.content_type,
+                                        ContentType::FormUrlEncoded,
+                                        "Form Encoded",
+                                    );
                                 });
 
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if self.content_type == ContentType::Json {
-                                        if ui.button("Prettify").clicked() {
+                                        if ui.button("✨ Prettify").clicked() {
                                             self.prettify_json();
                                         }
                                     }
@@ -354,189 +362,185 @@ impl MyApp {
                         });
                         ui.add_space(6.0);
 
-                        egui::ScrollArea::vertical()
-                            .id_salt("request_scroll")
-                            .show(ui, |ui| match self.content_type {
-                                ContentType::Json => {
-                                    let line_height =
-                                        ui.text_style_height(&egui::TextStyle::Monospace);
-                                    let rows =
-                                        (ui.available_height() / line_height).max(1.0) as usize;
+egui::ScrollArea::vertical()
+    .id_salt("request_scroll")
+    .show(ui, |ui| match self.content_type {
+        ContentType::Json => {
+            let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
+            let rows = (ui.available_height() / line_height).max(1.0) as usize;
 
-                                    ui.expand_to_include_rect(ui.max_rect());
+            ui.expand_to_include_rect(ui.max_rect());
 
+            ui.add(
+                egui::TextEdit::multiline(&mut self.body)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(rows)
+                    .layouter(&mut |ui, text, wrap_width| {
+                        let job = if self.find_dialog.open
+                            && self.find_dialog.context == FindContext::RequestBody
+                            && !self.find_dialog.find_text.is_empty()
+                        {
+                            MyApp::memoized_highlight_json(
+                                &self.highlight_cache,
+                                text.as_str(),
+                                &self.find_dialog.find_text,
+                                self.find_dialog.current_match_pos,
+                                self.find_dialog.case_sensitive,
+                            )
+                        } else {
+                            MyApp::memoized_highlight_json(
+                                &self.highlight_cache,
+                                text.as_str(),
+                                "",
+                                None,
+                                false,
+                            )
+                        };
+
+                        let mut job = job;
+                        job.wrap.max_width = wrap_width;
+                        ui.fonts_mut(|f| f.layout_job(job))
+                    }),
+            );
+        }
+        ContentType::FormData | ContentType::FormUrlEncoded => {
+            ui.set_max_width(ui.available_width());
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    let mut to_remove = None;
+
+                    for (i, field) in self.form_data.iter_mut().enumerate() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Key:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut field.key)
+                                    .hint_text("key")
+                                    .desired_width(ui.available_width() * 0.3),
+                            );
+
+                            // Only show combo box for FormData (multipart)
+                            if self.content_type == ContentType::FormData {
+                                egui::ComboBox::from_id_salt(format!("field_type_{}", i))
+                                    .selected_text(match field.field_type {
+                                        FormFieldType::Text => "Text",
+                                        FormFieldType::File => "File",
+                                    })
+                                    .width(40.0)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_value(
+                                                &mut field.field_type,
+                                                FormFieldType::Text,
+                                                "Text",
+                                            )
+                                            .clicked()
+                                        {
+                                            field.value.clear();
+                                            field.files.clear();
+                                        }
+                                        if ui
+                                            .selectable_value(
+                                                &mut field.field_type,
+                                                FormFieldType::File,
+                                                "File",
+                                            )
+                                            .clicked()
+                                        {
+                                            field.value.clear();
+                                            field.files.clear();
+                                        }
+                                    });
+                            }
+
+                            match field.field_type {
+                                FormFieldType::Text => {
+                                    ui.label("Value:");
                                     ui.add(
-                                        egui::TextEdit::multiline(&mut self.body)
-                                            .code_editor()
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(rows)
-                                            .layouter(&mut |ui, text, wrap_width| {
-                                                let job = if self.find_dialog.open
-                                                    && self.find_dialog.context
-                                                        == FindContext::RequestBody
-                                                    && !self.find_dialog.find_text.is_empty()
-                                                {
-                                                    MyApp::memoized_highlight_json(
-                                                        &self.highlight_cache,
-                                                        text.as_str(),
-                                                        &self.find_dialog.find_text,
-                                                        self.find_dialog.current_match_pos,
-                                                        self.find_dialog.case_sensitive,
-                                                    )
-                                                } else {
-                                                    MyApp::memoized_highlight_json(
-                                                        &self.highlight_cache,
-                                                        text.as_str(),
-                                                        "",
-                                                        None,
-                                                        false,
-                                                    )
-                                                };
-
-                                                let mut job = job;
-                                                job.wrap.max_width = wrap_width;
-                                                ui.fonts_mut(|f| f.layout_job(job))
-                                            }),
+                                        egui::TextEdit::singleline(&mut field.value)
+                                            .hint_text("value")
+                                            .desired_width(ui.available_width() * 0.4),
                                     );
                                 }
-                                ContentType::FormData => {
-                                    ui.set_max_width(ui.available_width());
-
-                                    egui::ScrollArea::vertical().auto_shrink([false; 2]).show(
-                                        ui,
-                                        |ui| {
-                                            let mut to_remove = None;
-
-                                            for (i, field) in self.form_data.iter_mut().enumerate()
+                                FormFieldType::File => {
+                                    // Only allow file selection for FormData
+                                    if self.content_type == ContentType::FormData {
+                                        ui.label("File:");
+                                        if ui.button("📁 Choose").clicked() {
+                                            if let Some(paths) =
+                                                rfd::FileDialog::new().pick_files()
                                             {
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.label("Key:");
-                                                    ui.add(
-                                                        egui::TextEdit::singleline(&mut field.key)
-                                                            .hint_text("key")
-                                                            .desired_width(
-                                                                ui.available_width() * 0.3,
-                                                            ),
-                                                    );
-
-                                                    egui::ComboBox::from_id_salt(format!(
-                                                        "field_type_{}",
-                                                        i
-                                                    ))
-                                                    .selected_text(match field.field_type {
-                                                        FormFieldType::Text => "Text",
-                                                        FormFieldType::File => "File",
-                                                    })
-                                                    .width(40.0)
-                                                    .show_ui(ui, |ui| {
-                                                        if ui
-                                                            .selectable_value(
-                                                                &mut field.field_type,
-                                                                FormFieldType::Text,
-                                                                "Text",
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            field.value.clear();
-                                                            field.files.clear();
-                                                        }
-                                                        if ui
-                                                            .selectable_value(
-                                                                &mut field.field_type,
-                                                                FormFieldType::File,
-                                                                "File",
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            field.value.clear();
-                                                            field.files.clear();
-                                                        }
-                                                    });
-
-                                                    match field.field_type {
-                                                        FormFieldType::Text => {
-                                                            ui.label("Value:");
-                                                            ui.add(
-                                                                egui::TextEdit::singleline(
-                                                                    &mut field.value,
-                                                                )
-                                                                .hint_text("value")
-                                                                .desired_width(
-                                                                    ui.available_width() * 0.4,
-                                                                ),
-                                                            );
-                                                        }
-                                                        FormFieldType::File => {
-                                                            ui.label("File:");
-                                                            if ui.button("📁 Choose").clicked() {
-                                                                if let Some(paths) =
-                                                                    rfd::FileDialog::new()
-                                                                        .pick_files()
-                                                                {
-                                                                    field.files = paths
-                                                                        .into_iter()
-                                                                        .map(|p| {
-                                                                            p.display().to_string()
-                                                                        })
-                                                                        .collect();
-                                                                }
-                                                            }
-                                                            if !field.files.is_empty() {
-                                                                ui.label(format!(
-                                                                    "📎 {} file(s)",
-                                                                    field.files.len()
-                                                                ));
-                                                            }
-                                                        }
-                                                    }
-
-                                                    if ui.button("❌").clicked() {
-                                                        to_remove = Some(i);
-                                                    }
-                                                });
-
-                                                // Show selected files (if any)
-                                                if field.field_type == FormFieldType::File
-                                                    && !field.files.is_empty()
-                                                {
-                                                    ui.indent(format!("files_{}", i), |ui| {
-                                                        for file in &field.files {
-                                                            ui.label(format!(
-                                                                "  • {}",
-                                                                std::path::Path::new(file)
-                                                                    .file_name()
-                                                                    .and_then(|n| n.to_str())
-                                                                    .unwrap_or(file)
-                                                            ));
-                                                        }
-                                                    });
-                                                }
-
-                                                ui.add_space(4.0);
-                                                ui.separator();
-                                                ui.add_space(4.0);
+                                                field.files = paths
+                                                    .into_iter()
+                                                    .map(|p| p.display().to_string())
+                                                    .collect();
                                             }
+                                        }
+                                        if !field.files.is_empty() {
+                                            ui.label(format!("📎 {} file(s)", field.files.len()));
+                                        }
+                                    } else {
+                                        // For FormUrlEncoded, force to Text type
+                                        field.field_type = FormFieldType::Text;
+                                        ui.label("Value:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut field.value)
+                                                .hint_text("value")
+                                                .desired_width(ui.available_width() * 0.4),
+                                        );
+                                    }
+                                }
+                            }
 
-                                            // Remove field if requested
-                                            if let Some(i) = to_remove {
-                                                self.form_data.remove(i);
-                                            }
+                            if ui.button("❌").clicked() {
+                                to_remove = Some(i);
+                            }
+                        });
 
-                                            ui.add_space(6.0);
-
-                                            // Add new field button
-                                            if ui.button("➕ Add Field").clicked() {
-                                                self.form_data.push(FormField {
-                                                    key: String::new(),
-                                                    value: String::new(),
-                                                    files: Vec::new(),
-                                                    field_type: FormFieldType::Text,
-                                                });
-                                            }
-                                        },
-                                    );
+                        // Show selected files (only for FormData)
+                        if self.content_type == ContentType::FormData
+                            && field.field_type == FormFieldType::File
+                            && !field.files.is_empty()
+                        {
+                            ui.indent(format!("files_{}", i), |ui| {
+                                for file in &field.files {
+                                    ui.label(format!(
+                                        "  • {}",
+                                        std::path::Path::new(file)
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or(file)
+                                    ));
                                 }
                             });
+                        }
+
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                    }
+
+                    // Remove field if requested
+                    if let Some(i) = to_remove {
+                        self.form_data.remove(i);
+                    }
+
+                    ui.add_space(6.0);
+
+                    // Add new field button
+                    if ui.button("➕ Add Field").clicked() {
+                        self.form_data.push(FormField {
+                            key: String::new(),
+                            value: String::new(),
+                            files: Vec::new(),
+                            field_type: FormFieldType::Text,
+                        });
+                    }
+                });
+        }
+    });
 
                         // Detect focus for find context
                         if ui.memory(|mem| mem.focused().is_some()) {
@@ -801,6 +805,18 @@ impl MyApp {
                             ContentType::Json => {
                                 req.body(body).header("Content-Type", "application/json")
                             }
+                            ContentType::FormUrlEncoded => {
+                                // Build URL-encoded form from form_data
+                                let mut params = vec![];
+                                for field in &form_data {
+                                    if !field.key.is_empty()
+                                        && field.field_type == FormFieldType::Text
+                                    {
+                                        params.push((field.key.clone(), field.value.clone()));
+                                    }
+                                }
+                                req.form(&params)
+                            }
                             ContentType::FormData => {
                                 let mut form = reqwest::multipart::Form::new();
                                 for field in form_data {
@@ -841,6 +857,17 @@ impl MyApp {
                         match content_type {
                             ContentType::Json => {
                                 req.body(body).header("Content-Type", "application/json")
+                            }
+                            ContentType::FormUrlEncoded => {
+                                let mut params = vec![];
+                                for field in &form_data {
+                                    if !field.key.is_empty()
+                                        && field.field_type == FormFieldType::Text
+                                    {
+                                        params.push((field.key.clone(), field.value.clone()));
+                                    }
+                                }
+                                req.form(&params)
                             }
                             ContentType::FormData => {
                                 let mut form = reqwest::multipart::Form::new();
@@ -883,6 +910,17 @@ impl MyApp {
                         match content_type {
                             ContentType::Json => {
                                 req.body(body).header("Content-Type", "application/json")
+                            }
+                            ContentType::FormUrlEncoded => {
+                                let mut params = vec![];
+                                for field in &form_data {
+                                    if !field.key.is_empty()
+                                        && field.field_type == FormFieldType::Text
+                                    {
+                                        params.push((field.key.clone(), field.value.clone()));
+                                    }
+                                }
+                                req.form(&params)
                             }
                             ContentType::FormData => {
                                 let mut form = reqwest::multipart::Form::new();
@@ -1644,9 +1682,9 @@ fn highlight_json_with_search(
                         TextFormat {
                             color: HIGHLIGHT_TEXT,
                             background: if is_current_match {
-                                Color32::from_rgb(255, 165, 0) // Orange for current
+                                Color32::from_rgb(255, 165, 0)
                             } else {
-                                HIGHLIGHT_BG // Yellow for others
+                                HIGHLIGHT_BG
                             },
                             ..Default::default()
                         },
