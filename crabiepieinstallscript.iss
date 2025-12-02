@@ -3,7 +3,7 @@
 ; --------------------------------------------------------------
 
 #define MyAppName      "CrabiPie"
-#define MyAppVersion   "1.0.0"
+#define MyAppVersion   "0.1.0"
 #define MyAppPublisher "Himal Poudel"
 #define MyAppURL       "https://github.com/himalpoudel334/CrabiPie"
 #define MyAppExeName   "CrabiPie.exe"

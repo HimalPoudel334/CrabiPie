@@ -4,7 +4,11 @@ use egui::IconData;
 use egui_extras::{Size, StripBuilder};
 use std::{
     collections::HashMap,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        atomic::Ordering,
+        mpsc::{self, Receiver, Sender},
+    },
+    time::Duration,
 };
 
 // const CRABIPIE_ICON_BASE64: &str = "some base64 string here";
@@ -136,6 +140,9 @@ struct MyApp {
     bearer_token: String,
     content_type: ContentType,
     form_data: Vec<FormField>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    request_timeout: u64,
+    request_start_time: Option<std::time::Instant>,
 
     // Response data
     response_status: String,
@@ -177,6 +184,9 @@ impl Default for MyApp {
   "userId": 1
 }"#
             .to_string(),
+            cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            request_timeout: 30,
+            request_start_time: None,
             response_status: String::new(),
             response_headers: String::new(),
             response_body: String::new(),
@@ -362,185 +372,214 @@ impl MyApp {
                         });
                         ui.add_space(6.0);
 
-egui::ScrollArea::vertical()
-    .id_salt("request_scroll")
-    .show(ui, |ui| match self.content_type {
-        ContentType::Json => {
-            let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
-            let rows = (ui.available_height() / line_height).max(1.0) as usize;
+                        egui::ScrollArea::vertical()
+                            .id_salt("request_scroll")
+                            .show(ui, |ui| match self.content_type {
+                                ContentType::Json => {
+                                    let line_height =
+                                        ui.text_style_height(&egui::TextStyle::Monospace);
+                                    let rows =
+                                        (ui.available_height() / line_height).max(1.0) as usize;
 
-            ui.expand_to_include_rect(ui.max_rect());
+                                    ui.expand_to_include_rect(ui.max_rect());
 
-            ui.add(
-                egui::TextEdit::multiline(&mut self.body)
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(rows)
-                    .layouter(&mut |ui, text, wrap_width| {
-                        let job = if self.find_dialog.open
-                            && self.find_dialog.context == FindContext::RequestBody
-                            && !self.find_dialog.find_text.is_empty()
-                        {
-                            MyApp::memoized_highlight_json(
-                                &self.highlight_cache,
-                                text.as_str(),
-                                &self.find_dialog.find_text,
-                                self.find_dialog.current_match_pos,
-                                self.find_dialog.case_sensitive,
-                            )
-                        } else {
-                            MyApp::memoized_highlight_json(
-                                &self.highlight_cache,
-                                text.as_str(),
-                                "",
-                                None,
-                                false,
-                            )
-                        };
-
-                        let mut job = job;
-                        job.wrap.max_width = wrap_width;
-                        ui.fonts_mut(|f| f.layout_job(job))
-                    }),
-            );
-        }
-        ContentType::FormData | ContentType::FormUrlEncoded => {
-            ui.set_max_width(ui.available_width());
-
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    let mut to_remove = None;
-
-                    for (i, field) in self.form_data.iter_mut().enumerate() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Key:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut field.key)
-                                    .hint_text("key")
-                                    .desired_width(ui.available_width() * 0.3),
-                            );
-
-                            // Only show combo box for FormData (multipart)
-                            if self.content_type == ContentType::FormData {
-                                egui::ComboBox::from_id_salt(format!("field_type_{}", i))
-                                    .selected_text(match field.field_type {
-                                        FormFieldType::Text => "Text",
-                                        FormFieldType::File => "File",
-                                    })
-                                    .width(40.0)
-                                    .show_ui(ui, |ui| {
-                                        if ui
-                                            .selectable_value(
-                                                &mut field.field_type,
-                                                FormFieldType::Text,
-                                                "Text",
-                                            )
-                                            .clicked()
-                                        {
-                                            field.value.clear();
-                                            field.files.clear();
-                                        }
-                                        if ui
-                                            .selectable_value(
-                                                &mut field.field_type,
-                                                FormFieldType::File,
-                                                "File",
-                                            )
-                                            .clicked()
-                                        {
-                                            field.value.clear();
-                                            field.files.clear();
-                                        }
-                                    });
-                            }
-
-                            match field.field_type {
-                                FormFieldType::Text => {
-                                    ui.label("Value:");
                                     ui.add(
-                                        egui::TextEdit::singleline(&mut field.value)
-                                            .hint_text("value")
-                                            .desired_width(ui.available_width() * 0.4),
+                                        egui::TextEdit::multiline(&mut self.body)
+                                            .code_editor()
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(rows)
+                                            .layouter(&mut |ui, text, wrap_width| {
+                                                let job = if self.find_dialog.open
+                                                    && self.find_dialog.context
+                                                        == FindContext::RequestBody
+                                                    && !self.find_dialog.find_text.is_empty()
+                                                {
+                                                    MyApp::memoized_highlight_json(
+                                                        &self.highlight_cache,
+                                                        text.as_str(),
+                                                        &self.find_dialog.find_text,
+                                                        self.find_dialog.current_match_pos,
+                                                        self.find_dialog.case_sensitive,
+                                                    )
+                                                } else {
+                                                    MyApp::memoized_highlight_json(
+                                                        &self.highlight_cache,
+                                                        text.as_str(),
+                                                        "",
+                                                        None,
+                                                        false,
+                                                    )
+                                                };
+
+                                                let mut job = job;
+                                                job.wrap.max_width = wrap_width;
+                                                ui.fonts_mut(|f| f.layout_job(job))
+                                            }),
                                     );
                                 }
-                                FormFieldType::File => {
-                                    // Only allow file selection for FormData
-                                    if self.content_type == ContentType::FormData {
-                                        ui.label("File:");
-                                        if ui.button("📁 Choose").clicked() {
-                                            if let Some(paths) =
-                                                rfd::FileDialog::new().pick_files()
+                                ContentType::FormData | ContentType::FormUrlEncoded => {
+                                    ui.set_max_width(ui.available_width());
+
+                                    egui::ScrollArea::vertical().auto_shrink([false; 2]).show(
+                                        ui,
+                                        |ui| {
+                                            let mut to_remove = None;
+
+                                            for (i, field) in self.form_data.iter_mut().enumerate()
                                             {
-                                                field.files = paths
-                                                    .into_iter()
-                                                    .map(|p| p.display().to_string())
-                                                    .collect();
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.label("Key:");
+                                                    ui.add(
+                                                        egui::TextEdit::singleline(&mut field.key)
+                                                            .hint_text("key")
+                                                            .desired_width(
+                                                                ui.available_width() * 0.3,
+                                                            ),
+                                                    );
+
+                                                    // Only show combo box for FormData (multipart)
+                                                    if self.content_type == ContentType::FormData {
+                                                        egui::ComboBox::from_id_salt(format!(
+                                                            "field_type_{}",
+                                                            i
+                                                        ))
+                                                        .selected_text(match field.field_type {
+                                                            FormFieldType::Text => "Text",
+                                                            FormFieldType::File => "File",
+                                                        })
+                                                        .width(40.0)
+                                                        .show_ui(ui, |ui| {
+                                                            if ui
+                                                                .selectable_value(
+                                                                    &mut field.field_type,
+                                                                    FormFieldType::Text,
+                                                                    "Text",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                field.value.clear();
+                                                                field.files.clear();
+                                                            }
+                                                            if ui
+                                                                .selectable_value(
+                                                                    &mut field.field_type,
+                                                                    FormFieldType::File,
+                                                                    "File",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                field.value.clear();
+                                                                field.files.clear();
+                                                            }
+                                                        });
+                                                    }
+
+                                                    match field.field_type {
+                                                        FormFieldType::Text => {
+                                                            ui.label("Value:");
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(
+                                                                    &mut field.value,
+                                                                )
+                                                                .hint_text("value")
+                                                                .desired_width(
+                                                                    ui.available_width() * 0.4,
+                                                                ),
+                                                            );
+                                                        }
+                                                        FormFieldType::File => {
+                                                            // Only allow file selection for FormData
+                                                            if self.content_type
+                                                                == ContentType::FormData
+                                                            {
+                                                                ui.label("File:");
+                                                                if ui.button("📁 Choose").clicked()
+                                                                {
+                                                                    if let Some(paths) =
+                                                                        rfd::FileDialog::new()
+                                                                            .pick_files()
+                                                                    {
+                                                                        field.files = paths
+                                                                            .into_iter()
+                                                                            .map(|p| {
+                                                                                p.display()
+                                                                                    .to_string()
+                                                                            })
+                                                                            .collect();
+                                                                    }
+                                                                }
+                                                                if !field.files.is_empty() {
+                                                                    ui.label(format!(
+                                                                        "📎 {} file(s)",
+                                                                        field.files.len()
+                                                                    ));
+                                                                }
+                                                            } else {
+                                                                // For FormUrlEncoded, force to Text type
+                                                                field.field_type =
+                                                                    FormFieldType::Text;
+                                                                ui.label("Value:");
+                                                                ui.add(
+                                                                    egui::TextEdit::singleline(
+                                                                        &mut field.value,
+                                                                    )
+                                                                    .hint_text("value")
+                                                                    .desired_width(
+                                                                        ui.available_width() * 0.4,
+                                                                    ),
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if ui.button("❌").clicked() {
+                                                        to_remove = Some(i);
+                                                    }
+                                                });
+
+                                                // Show selected files (only for FormData)
+                                                if self.content_type == ContentType::FormData
+                                                    && field.field_type == FormFieldType::File
+                                                    && !field.files.is_empty()
+                                                {
+                                                    ui.indent(format!("files_{}", i), |ui| {
+                                                        for file in &field.files {
+                                                            ui.label(format!(
+                                                                "  • {}",
+                                                                std::path::Path::new(file)
+                                                                    .file_name()
+                                                                    .and_then(|n| n.to_str())
+                                                                    .unwrap_or(file)
+                                                            ));
+                                                        }
+                                                    });
+                                                }
+
+                                                ui.add_space(4.0);
+                                                ui.separator();
+                                                ui.add_space(4.0);
                                             }
-                                        }
-                                        if !field.files.is_empty() {
-                                            ui.label(format!("📎 {} file(s)", field.files.len()));
-                                        }
-                                    } else {
-                                        // For FormUrlEncoded, force to Text type
-                                        field.field_type = FormFieldType::Text;
-                                        ui.label("Value:");
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut field.value)
-                                                .hint_text("value")
-                                                .desired_width(ui.available_width() * 0.4),
-                                        );
-                                    }
-                                }
-                            }
 
-                            if ui.button("❌").clicked() {
-                                to_remove = Some(i);
-                            }
-                        });
+                                            // Remove field if requested
+                                            if let Some(i) = to_remove {
+                                                self.form_data.remove(i);
+                                            }
 
-                        // Show selected files (only for FormData)
-                        if self.content_type == ContentType::FormData
-                            && field.field_type == FormFieldType::File
-                            && !field.files.is_empty()
-                        {
-                            ui.indent(format!("files_{}", i), |ui| {
-                                for file in &field.files {
-                                    ui.label(format!(
-                                        "  • {}",
-                                        std::path::Path::new(file)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or(file)
-                                    ));
+                                            ui.add_space(6.0);
+
+                                            // Add new field button
+                                            if ui.button("➕ Add Field").clicked() {
+                                                self.form_data.push(FormField {
+                                                    key: String::new(),
+                                                    value: String::new(),
+                                                    files: Vec::new(),
+                                                    field_type: FormFieldType::Text,
+                                                });
+                                            }
+                                        },
+                                    );
                                 }
                             });
-                        }
-
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-                    }
-
-                    // Remove field if requested
-                    if let Some(i) = to_remove {
-                        self.form_data.remove(i);
-                    }
-
-                    ui.add_space(6.0);
-
-                    // Add new field button
-                    if ui.button("➕ Add Field").clicked() {
-                        self.form_data.push(FormField {
-                            key: String::new(),
-                            value: String::new(),
-                            files: Vec::new(),
-                            field_type: FormFieldType::Text,
-                        });
-                    }
-                });
-        }
-    });
 
                         // Detect focus for find context
                         if ui.memory(|mem| mem.focused().is_some()) {
@@ -773,6 +812,10 @@ egui::ScrollArea::vertical()
         self.response_body = "Loading...".to_string();
         self.response_status = String::new();
 
+        // Reset cancel flag and start timer
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        self.request_start_time = Some(std::time::Instant::now());
+
         let url = self.url.clone();
         let method = self.method.clone();
         let body = self.body.clone();
@@ -782,6 +825,8 @@ egui::ScrollArea::vertical()
         let content_type = self.content_type.clone();
         let form_data = self.form_data.clone();
         let tx = self.tx.clone();
+        let cancel_flag = self.cancel_flag.clone();
+        let timeout = self.request_timeout;
 
         // Add Bearer token to headers if set
         if auth_type == AuthType::Bearer && !bearer_token.is_empty() {
@@ -795,7 +840,23 @@ egui::ScrollArea::vertical()
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let response = rt.block_on(async {
-                let client = reqwest::Client::new();
+                // Check if cancelled before starting
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return HttpResponse {
+                        status: "Cancelled".to_string(),
+                        headers: String::new(),
+                        body: "Request was cancelled".to_string(),
+                        is_binary: false,
+                        filename: String::new(),
+                        bytes: Vec::new(),
+                        content_type: String::new(),
+                    };
+                }
+
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(timeout))
+                    .build()
+                    .unwrap();
 
                 let mut request = match method {
                     HttpMethod::GET => client.get(&url),
@@ -806,7 +867,6 @@ egui::ScrollArea::vertical()
                                 req.body(body).header("Content-Type", "application/json")
                             }
                             ContentType::FormUrlEncoded => {
-                                // Build URL-encoded form from form_data
                                 let mut params = vec![];
                                 for field in &form_data {
                                     if !field.key.is_empty()
@@ -962,8 +1022,34 @@ egui::ScrollArea::vertical()
                 // Add custom headers
                 request = request.headers(headers);
 
+                // Check cancellation before sending
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return HttpResponse {
+                        status: "Cancelled".to_string(),
+                        headers: String::new(),
+                        body: "Request was cancelled".to_string(),
+                        is_binary: false,
+                        filename: String::new(),
+                        bytes: Vec::new(),
+                        content_type: String::new(),
+                    };
+                }
+
                 match request.send().await {
                     Ok(resp) => {
+                        // Check cancellation after receiving response
+                        if cancel_flag.load(Ordering::Relaxed) {
+                            return HttpResponse {
+                                status: "Cancelled".to_string(),
+                                headers: String::new(),
+                                body: "Request was cancelled".to_string(),
+                                is_binary: false,
+                                filename: String::new(),
+                                bytes: Vec::new(),
+                                content_type: String::new(),
+                            };
+                        }
+
                         let status = format!(
                             "{} {}",
                             resp.status().as_u16(),
@@ -1001,6 +1087,17 @@ egui::ScrollArea::vertical()
                         let (body, bytes) = if is_binary {
                             match resp.bytes().await {
                                 Ok(bytes) => {
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        return HttpResponse {
+                                            status: "Cancelled".to_string(),
+                                            headers: String::new(),
+                                            body: "Request was cancelled".to_string(),
+                                            is_binary: false,
+                                            filename: String::new(),
+                                            bytes: Vec::new(),
+                                            content_type: String::new(),
+                                        };
+                                    }
                                     let body = format!(
                                         "Binary file ({} bytes)\n\nContent-Type: {}",
                                         bytes.len(),
@@ -1015,6 +1112,18 @@ egui::ScrollArea::vertical()
                                 .text()
                                 .await
                                 .unwrap_or_else(|e| format!("Error reading body: {}", e));
+
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                return HttpResponse {
+                                    status: "Cancelled".to_string(),
+                                    headers: String::new(),
+                                    body: "Request was cancelled".to_string(),
+                                    is_binary: false,
+                                    filename: String::new(),
+                                    bytes: Vec::new(),
+                                    content_type: String::new(),
+                                };
+                            }
 
                             // Try to pretty print JSON
                             let body = if let Ok(json) =
@@ -1037,20 +1146,53 @@ egui::ScrollArea::vertical()
                             content_type,
                         }
                     }
-                    Err(e) => HttpResponse {
-                        status: "Error".to_string(),
-                        headers: String::new(),
-                        body: format!("Request failed: {}", e),
-                        is_binary: false,
-                        filename: String::new(),
-                        bytes: Vec::new(),
-                        content_type: String::new(),
-                    },
+                    Err(e) => {
+                        let error_msg = if e.is_timeout() {
+                            format!("Request timed out after {} seconds", timeout)
+                        } else {
+                            format!("Request failed: {}", e)
+                        };
+
+                        HttpResponse {
+                            status: "Error".to_string(),
+                            headers: String::new(),
+                            body: error_msg,
+                            is_binary: false,
+                            filename: String::new(),
+                            bytes: Vec::new(),
+                            content_type: String::new(),
+                        }
+                    }
                 }
             });
 
             let _ = tx.send(response);
         });
+    }
+
+    fn cancel_request(&mut self) {
+        self.cancel_flag.store(true, Ordering::Relaxed);
+        self.loading = false;
+        self.request_start_time = None;
+        self.response_body = "Request cancelled by user".to_string();
+        self.response_status = "Cancelled".to_string();
+    }
+
+    fn get_elapsed_time(&self) -> Option<Duration> {
+        self.request_start_time.map(|start| start.elapsed())
+    }
+
+    fn should_show_cancel_button(&self) -> bool {
+        if !self.loading {
+            return false;
+        }
+
+        if let Some(elapsed) = self.get_elapsed_time() {
+            // Show cancel button if elapsed time >= timeout
+            elapsed.as_secs() >= self.request_timeout
+        } else {
+            false
+        }
     }
 
     fn render_find_dialog(&mut self, ctx: &egui::Context) {
@@ -1496,11 +1638,40 @@ impl eframe::App for MyApp {
                         });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let send_button_text = if self.loading { "Sending…" } else { "Send" };
-                        let send_button = ui.add_enabled(
-                            !self.loading && !self.url.trim().is_empty(),
-                            egui::Button::new(send_button_text).min_size(egui::vec2(80.0, 30.0)),
-                        );
+                        if self.loading {
+                            if self.should_show_cancel_button() {
+                                // Show cancel button after timeout period
+                                if ui
+                                    .add_sized(
+                                        egui::vec2(80.0, 30.0),
+                                        egui::Button::new("⏹ Cancel"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.cancel_request();
+                                }
+                            } else {
+                                // Show "Sending..." with elapsed time
+                                if let Some(elapsed) = self.get_elapsed_time() {
+                                    ui.add_enabled(
+                                        false,
+                                        egui::Button::new(format!(
+                                            "📤 Sending... {}s",
+                                            elapsed.as_secs()
+                                        )),
+                                    );
+                                } else {
+                                    ui.add_enabled(false, egui::Button::new("📤 Sending..."));
+                                }
+                            }
+                        } else {
+                            if ui
+                                .add_sized(egui::vec2(80.0, 30.0), egui::Button::new("📤 Send"))
+                                .clicked()
+                            {
+                                self.send_request();
+                            }
+                        }
 
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut self.url)
@@ -1532,10 +1703,7 @@ impl eframe::App for MyApp {
                             response.request_focus();
                         }
 
-                        if send_button.clicked()
-                            || (response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                        {
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             self.send_request();
                         }
                     });
